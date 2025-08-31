@@ -342,6 +342,9 @@ func main() {
 }
 
 func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filename string, stream io.Reader, cryptConfig *CryptConfig, config *Config ) error {
+	var err error
+	var previouslyEncrypted bool
+	var previousDidx []byte
 	knownChunks := hashmap.New[string, bool]()
 	client.Connect(false)
 	
@@ -350,7 +353,7 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 	// Auto-detect encryption mode mismatch
 	if !forceFullBackup {
 		currentlyEncrypted := (cryptConfig != nil)
-		previouslyEncrypted, err := client.CheckPreviousEncryptionMode()
+		previouslyEncrypted, err = client.CheckPreviousEncryptionMode()
 		if err != nil {
 			fmt.Printf("Warning: Could not check previous encryption mode: %v\n", err)
 		} else if currentlyEncrypted != previouslyEncrypted {
@@ -360,7 +363,7 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 	}
 	
 	if !forceFullBackup {
-		previousDidx, err := client.DownloadPreviousToBytes(filename)
+		previousDidx, err = client.DownloadPreviousToBytes(filename)
 		if err != nil {
 			return err
 		}
@@ -423,6 +426,9 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 }
 
 func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut string, backupdir string, cryptConfig *CryptConfig, config *Config) error {
+	var err error
+	var previouslyEncrypted bool
+	var previousDidx []byte
 	knownChunks := hashmap.New[string, bool]()
 
 	fmt.Printf("Starting backup of %s\n", backupdir)
@@ -441,7 +447,7 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	// Auto-detect encryption mode mismatch
 	if !forceFullBackup {
 		currentlyEncrypted := (cryptConfig != nil)
-		previouslyEncrypted, err := client.CheckPreviousEncryptionMode()
+		previouslyEncrypted, err = client.CheckPreviousEncryptionMode()
 		if err != nil {
 			fmt.Printf("Warning: Could not check previous encryption mode: %v\n", err)
 		} else if currentlyEncrypted != previouslyEncrypted {
@@ -451,7 +457,7 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	}
 
 	if !forceFullBackup {
-		previousDidx, err := client.DownloadPreviousToBytes(archive.archivename)
+		previousDidx, err = client.DownloadPreviousToBytes(archive.archivename)
 		if err != nil {
 			return err
 		}
