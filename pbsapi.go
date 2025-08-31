@@ -96,6 +96,8 @@ type PBSClient struct {
 
 var blobCompressedMagic = []byte{49, 185, 88, 66, 111, 182, 163, 127}
 var blobUncompressedMagic = []byte{66, 171, 56, 7, 190, 131, 112, 161}
+var blobEncryptedMagic = []byte{123, 103, 133, 190, 34, 45, 76, 240}
+var blobEncryptedCompressedMagic = []byte{230, 89, 27, 191, 11, 191, 216, 11}
 
 func (pbs *PBSClient) CreateDynamicIndex(name string) (uint64, error) {
 
@@ -143,7 +145,7 @@ func (pbs *PBSClient) CreateDynamicIndex(name string) (uint64, error) {
 	return uint64(R.WriterID), nil
 }
 
-func (pbs *PBSClient) UploadUncompressedChunk(writerid uint64, digest string, chunkdata []byte) error {
+func (pbs *PBSClient) UploadUncompressedChunk(writerid uint64, digest string, chunkdata []byte, originalSize int) error {
 	outBuffer := make([]byte, 0)
 	outBuffer = append(outBuffer, blobUncompressedMagic...)
 	checksum := crc32.Checksum(chunkdata, crc32.IEEETable)
@@ -153,7 +155,7 @@ func (pbs *PBSClient) UploadUncompressedChunk(writerid uint64, digest string, ch
 	q := &url.Values{}
 	q.Add("digest", digest)
 	q.Add("encoded-size", fmt.Sprintf("%d", len(outBuffer)))
-	q.Add("size", fmt.Sprintf("%d", len(chunkdata)))
+	q.Add("size", fmt.Sprintf("%d", originalSize))
 	q.Add("wid", fmt.Sprintf("%d", writerid))
 
 	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_chunk?"+q.Encode(), bytes.NewBuffer(outBuffer))
@@ -175,7 +177,7 @@ func (pbs *PBSClient) UploadUncompressedChunk(writerid uint64, digest string, ch
 	return nil
 }
 
-func (pbs *PBSClient) UploadCompressedChunk(writerid uint64, digest string, chunkdata []byte) error {
+func (pbs *PBSClient) UploadCompressedChunk(writerid uint64, digest string, chunkdata []byte, originalSize int) error {
 	outBuffer := make([]byte, 0)
 	outBuffer = append(outBuffer, blobCompressedMagic...)
 	compressedData := make([]byte, 0)
@@ -192,7 +194,7 @@ func (pbs *PBSClient) UploadCompressedChunk(writerid uint64, digest string, chun
 	outBuffer = append(outBuffer, compressedData...)
 
 	if len(compressedData) > len(chunkdata) {
-		pbs.UploadUncompressedChunk(writerid, digest, chunkdata)
+		pbs.UploadUncompressedChunk(writerid, digest, chunkdata, originalSize)
 		return nil
 	}
 	//fmt.Printf("Compressed: %d , Orig: %d\n", len(compressedData), len(chunkdata))
@@ -200,7 +202,7 @@ func (pbs *PBSClient) UploadCompressedChunk(writerid uint64, digest string, chun
 	q := &url.Values{}
 	q.Add("digest", digest)
 	q.Add("encoded-size", fmt.Sprintf("%d", len(outBuffer)))
-	q.Add("size", fmt.Sprintf("%d", len(chunkdata)))
+	q.Add("size", fmt.Sprintf("%d", originalSize))
 	q.Add("wid", fmt.Sprintf("%d", writerid))
 
 	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_chunk?"+q.Encode(), bytes.NewBuffer(outBuffer))
@@ -330,6 +332,35 @@ func (pbs *PBSClient) Finish() error {
 		}
 	}
 	defer resp2.Body.Close()
+	return nil
+}
+
+func (pbs *PBSClient) UploadRawChunk(writerid uint64, digest string, chunkdata []byte, originalSize int) error {
+	// For encrypted chunks, chunkdata is already a properly formatted DataBlob
+	// Just upload it directly without any additional processing
+	q := &url.Values{}
+	q.Add("digest", digest)
+	q.Add("encoded-size", fmt.Sprintf("%d", len(chunkdata)))
+	q.Add("size", fmt.Sprintf("%d", originalSize))
+	q.Add("wid", fmt.Sprintf("%d", writerid))
+
+	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_chunk?"+q.Encode(), bytes.NewBuffer(chunkdata))
+	if err != nil {
+		return err
+	}
+
+	resp2, err := pbs.client.Do(req)
+	if err != nil {
+		fmt.Println("Error making request:", err)
+		return err
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		resp1, err := io.ReadAll(resp2.Body)
+		fmt.Println("Error making request:", string(resp1), string(resp2.Proto))
+		return err
+	}
 	return nil
 }
 

@@ -72,6 +72,21 @@ func (c *ChunkState) Init(newchunk *atomic.Uint64 , reusechunk *atomic.Uint64, k
 	c.knownChunks = knownChunks
 }
 
+// computeChunkDigest computes the correct digest for a chunk following PBS spec
+func (c *ChunkState) computeChunkDigest(data []byte) ([]byte, string) {
+	if c.cryptConfig != nil {
+		// For encrypted chunks: hash plaintext + encryption key
+		digest := c.cryptConfig.ComputeDigest(data)
+		return digest[:], hex.EncodeToString(digest[:])
+	} else {
+		// For unencrypted chunks: hash plaintext only
+		h := sha256.New()
+		h.Write(data)
+		bindigest := h.Sum(nil)
+		return bindigest, hex.EncodeToString(bindigest)
+	}
+}
+
 func (c *ChunkState) HandleData(b []byte, client *PBSClient){
 	chunkpos := c.C.Scan(b)
 
@@ -84,18 +99,15 @@ func (c *ChunkState) HandleData(b []byte, client *PBSClient){
 			//Append data until break position
 			c.current_chunk = append(c.current_chunk, b[:chunkpos]...)
 
-			h := sha256.New()
-			// TODO: error handling inside callback
-			h.Write(c.current_chunk)
-			bindigest := h.Sum(nil)
-			shahash := hex.EncodeToString(bindigest)
+			// Compute digest according to PBS spec (plaintext + key for encrypted chunks)
+			bindigest, shahash := c.computeChunkDigest(c.current_chunk)
 
 			chunkData := c.current_chunk
 			if c.cryptConfig != nil {
 				var err error
-				chunkData, err = c.cryptConfig.EncryptChunk(c.current_chunk)
+				chunkData, err = c.cryptConfig.EncodeDataBlob(c.current_chunk, true)
 				if err != nil {
-					fmt.Printf("Encryption failed: %v\n", err)
+					fmt.Printf("DataBlob encoding failed: %v\n", err)
 					return
 				}
 			}
@@ -104,7 +116,12 @@ func (c *ChunkState) HandleData(b []byte, client *PBSClient){
 				fmt.Printf("New chunk[%s] %d bytes\n", shahash, len(chunkData))
 				c.newchunk.Add(1)
 
-				client.UploadCompressedChunk(c.wrid, shahash, chunkData)
+				if c.cryptConfig != nil {
+					// For encrypted chunks, upload as raw blob since it's already in DataBlob format
+					client.UploadRawChunk(c.wrid, shahash, chunkData, len(c.current_chunk))
+				} else {
+					client.UploadCompressedChunk(c.wrid, shahash, chunkData, len(c.current_chunk))
+				}
 			} else {
 				fmt.Printf("Reuse chunk[%s] %d bytes\n", shahash, len(chunkData))
 				c.reusechunk.Add(1)
@@ -113,7 +130,7 @@ func (c *ChunkState) HandleData(b []byte, client *PBSClient){
 			// TODO: error handling inside callback
 			binary.Write(c.chunkdigests, binary.LittleEndian, (c.pos + uint64(len(c.current_chunk))))
 			// TODO: error handling inside callback
-			c.chunkdigests.Write(h.Sum(nil))
+			c.chunkdigests.Write(bindigest)
 
 			c.assignments_offset = append(c.assignments_offset, c.pos)
 			c.assignments = append(c.assignments, shahash)
@@ -135,30 +152,30 @@ func (c *ChunkState) Eof(client *PBSClient) {
 	//Here we write the remainder of data for which cyclic hash did not trigger
 	
 	if len(c.current_chunk) > 0 {
-		h := sha256.New()
-		_, err := h.Write(c.current_chunk)
-		if err != nil {
-			panic(err)
-		}
-
-		shahash := hex.EncodeToString(h.Sum(nil))
+		// Compute digest according to PBS spec (plaintext + key for encrypted chunks)
+		bindigest, shahash := c.computeChunkDigest(c.current_chunk)
 
 		chunkData := c.current_chunk
 		if c.cryptConfig != nil {
 			var err error
-			chunkData, err = c.cryptConfig.EncryptChunk(c.current_chunk)
+			chunkData, err = c.cryptConfig.EncodeDataBlob(c.current_chunk, true)
 			if err != nil {
-				fmt.Printf("Encryption failed: %v\n", err)
+				fmt.Printf("DataBlob encoding failed: %v\n", err)
 				return
 			}
 		}
 
 		binary.Write(c.chunkdigests, binary.LittleEndian, (c.pos + uint64(len(c.current_chunk))))
-		c.chunkdigests.Write(h.Sum(nil))
+		c.chunkdigests.Write(bindigest)
 
 		if _, ok := c.knownChunks.GetOrInsert(shahash, true); !ok {
 			fmt.Printf("New chunk[%s] %d bytes\n", shahash, len(chunkData))
-			client.UploadCompressedChunk(c.wrid, shahash, chunkData)
+			if c.cryptConfig != nil {
+				// For encrypted chunks, upload as raw blob since it's already in DataBlob format
+				client.UploadRawChunk(c.wrid, shahash, chunkData, len(c.current_chunk))
+			} else {
+				client.UploadCompressedChunk(c.wrid, shahash, chunkData, len(c.current_chunk))
+			}
 			c.newchunk.Add(1)
 		} else {
 			fmt.Printf("Reuse chunk[%s] %d bytes\n", shahash, len(chunkData))
@@ -365,9 +382,14 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 	if !forceFullBackup {
 		previousDidx, err = client.DownloadPreviousToBytes(filename)
 		if err != nil {
-			return err
+			fmt.Printf("Could not download previous DIDX (this is normal for first backup): %v\n", err)
+			fmt.Printf("Forcing full backup mode\n")
+			forceFullBackup = true
 		}
 
+	}
+	
+	if !forceFullBackup && len(previousDidx) > 0 {
 		fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
 
 		if !bytes.HasPrefix(previousDidx, didxMagic) {
@@ -387,7 +409,7 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 			}
 		}
 	} else {
-		fmt.Printf("Full backup mode - skipping previous DIDX download\n")
+		fmt.Printf("Full backup mode - skipping previous DIDX processing\n")
 	}
 
 	fmt.Printf("Known chunks: %d!\n", knownChunks.Len())
@@ -459,9 +481,14 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	if !forceFullBackup {
 		previousDidx, err = client.DownloadPreviousToBytes(archive.archivename)
 		if err != nil {
-			return err
+			fmt.Printf("Could not download previous DIDX (this is normal for first backup): %v\n", err)
+			fmt.Printf("Forcing full backup mode\n")
+			forceFullBackup = true
 		}
 
+	}
+	
+	if !forceFullBackup && len(previousDidx) > 0 {
 		fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
 
 		/*f2, _ := os.Create("test.didx")
@@ -491,7 +518,7 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 			}
 		}
 	} else {
-		fmt.Printf("Full backup mode - skipping previous DIDX download\n")
+		fmt.Printf("Full backup mode - skipping previous DIDX processing\n")
 	}
 
 	fmt.Printf("Known chunks: %d!\n", knownChunks.Len())

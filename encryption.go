@@ -5,14 +5,18 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"golang.org/x/crypto/scrypt"
+	"github.com/klauspost/compress/zstd"
 )
 
 type ScryptKDF struct {
@@ -124,7 +128,79 @@ func (cc *CryptConfig) DecryptChunk(ciphertext []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
+// ComputeDigest computes the chunk digest for encrypted chunks following PBS spec:
+// "The hashes of encrypted chunks are calculated not with the actual (encrypted) chunk content, 
+// but with the plain-text content, concatenated with the encryption key."
+func (cc *CryptConfig) ComputeDigest(data []byte) [32]byte {
+	h := sha256.New()
+	h.Write(data)          // plaintext data first
+	h.Write(cc.encKey)     // encryption key appended to avoid collisions across different keys
+	var digest [32]byte
+	copy(digest[:], h.Sum(nil))
+	return digest
+}
 
+// EncodeDataBlob creates a properly formatted DataBlob for encrypted chunks
+// following the PBS DataBlob format: MAGIC || CRC32 || IV || TAG || EncryptedData
+func (cc *CryptConfig) EncodeDataBlob(plaintext []byte, compress bool) ([]byte, error) {
+	var dataToEncrypt []byte
+	var magic []byte
+	
+	if compress {
+		// Try compression first
+		compressor, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create zstd compressor: %v", err)
+		}
+		compressed := compressor.EncodeAll(plaintext, nil)
+		compressor.Close()
+		
+		// Use compression only if it actually reduces size
+		if len(compressed) < len(plaintext) {
+			dataToEncrypt = compressed
+			magic = []byte{230, 89, 27, 191, 11, 191, 216, 11} // ENCR_COMPR_BLOB_MAGIC_1_0
+		} else {
+			dataToEncrypt = plaintext
+			magic = []byte{123, 103, 133, 190, 34, 45, 76, 240} // ENCRYPTED_BLOB_MAGIC_1_0
+		}
+	} else {
+		dataToEncrypt = plaintext
+		magic = []byte{123, 103, 133, 190, 34, 45, 76, 240} // ENCRYPTED_BLOB_MAGIC_1_0
+	}
+	
+	// Generate random IV
+	iv := make([]byte, cc.gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return nil, fmt.Errorf("failed to generate IV: %v", err)
+	}
+	
+	// Encrypt the data
+	encryptedData := cc.gcm.Seal(nil, iv, dataToEncrypt, nil)
+	
+	// For AES-GCM, the tag is appended to the ciphertext by Seal()
+	// Extract tag (last 16 bytes of encrypted data for AES-GCM)
+	if len(encryptedData) < 16 {
+		return nil, fmt.Errorf("encrypted data too short")
+	}
+	actualEncrypted := encryptedData[:len(encryptedData)-16]
+	tag := encryptedData[len(encryptedData)-16:]
+	
+	// Build the DataBlob: MAGIC || CRC32 || IV || TAG || EncryptedData
+	var result []byte
+	result = append(result, magic...)         // 8 bytes magic
+	result = append(result, make([]byte, 4)...)  // 4 bytes CRC (placeholder)
+	result = append(result, iv...)            // 16 bytes IV  
+	result = append(result, tag...)           // 16 bytes tag
+	result = append(result, actualEncrypted...) // encrypted data
+	
+	// Calculate and set CRC32 over everything after the header
+	headerSize := 8 + 4  // magic + crc
+	crcData := result[headerSize:]
+	checksum := crc32.ChecksumIEEE(crcData)
+	binary.LittleEndian.PutUint32(result[8:12], checksum)
+	
+	return result, nil
+}
 
 func loadMasterKey(path string) (*rsa.PublicKey, error) {
 	keyData, err := os.ReadFile(path)
