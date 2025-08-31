@@ -28,17 +28,21 @@ type SMTPConfig struct {
 }
 
 type Config struct {
-	BaseURL          string      `json:"baseurl"`
-	CertFingerprint  string      `json:"certfingerprint"`
-	AuthID           string      `json:"authid"`
-	Secret           string      `json:"secret"`
-	Datastore        string      `json:"datastore"`
-	Namespace        string      `json:"namespace"`
-	BackupID         string      `json:"backup-id"`
-	BackupSourceDir  string      `json:"backupdir"`
-	BackupStreamName string 	 `json:"backupstreamname"`
-	PxarOut          string      `json:"pxarout"`
-	SMTP             *SMTPConfig `json:"smtp"`
+	BaseURL              string      `json:"baseurl"`
+	CertFingerprint      string      `json:"certfingerprint"`
+	AuthID               string      `json:"authid"`
+	Secret               string      `json:"secret"`
+	Datastore            string      `json:"datastore"`
+	Namespace            string      `json:"namespace"`
+	BackupID             string      `json:"backup-id"`
+	BackupSourceDir      string      `json:"backupdir"`
+	BackupStreamName     string      `json:"backupstreamname"`
+	PxarOut              string      `json:"pxarout"`
+	EncryptionKeyPath    string      `json:"encryption-key-path"`
+	EncryptionPassword   string      `json:"encryption-password"`
+	MasterKeyPath        string      `json:"master-key-path"`
+	ForceFullBackup      bool        `json:"force-full-backup"`
+	SMTP                 *SMTPConfig `json:"smtp"`
 }
 
 func (c *Config) valid() bool {
@@ -83,6 +87,11 @@ func loadConfig() *Config {
 	mailToFlag := flag.String("mail-to", "", "mail notification system: receiver mail(optional)")
 	mailSubjectTemplateFlag := flag.String("mail-subject-template", "", "mail notification system: mail subject template(optional)")
 	mailBodyTemplateFlag := flag.String("mail-body-template", "", "mail notification system: mail body template(optional)")
+
+	encryptionKeyPathFlag := flag.String("encryption-key-path", "", "Path to encryption key file (optional)")
+	encryptionPasswordFlag := flag.String("encryption-password", "", "Password for encrypted key file (optional)")
+	masterKeyPathFlag := flag.String("master-key-path", "", "Path to RSA master key for key recovery (optional)")
+	forceFullBackupFlag := flag.Bool("force-full-backup", false, "Force a full backup, ignoring previous backup for incremental deduplication (optional)")
 
 	configFile := flag.String("config", "", "Path to JSON config file. If this flag is provided all the others will override the loaded config file")
 
@@ -182,6 +191,18 @@ func loadConfig() *Config {
 	if *mailBodyTemplateFlag != "" {
 		initSmtpConfigIfNeeded()
 		config.SMTP.Template.Body = *mailBodyTemplateFlag
+	}
+	if *encryptionKeyPathFlag != "" {
+		config.EncryptionKeyPath = *encryptionKeyPathFlag
+	}
+	if *encryptionPasswordFlag != "" {
+		config.EncryptionPassword = *encryptionPasswordFlag
+	}
+	if *masterKeyPathFlag != "" {
+		config.MasterKeyPath = *masterKeyPathFlag
+	}
+	if *forceFullBackupFlag {
+		config.ForceFullBackup = *forceFullBackupFlag
 	}
 
 	return config

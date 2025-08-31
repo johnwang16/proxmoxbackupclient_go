@@ -86,6 +86,7 @@ type PBSClient struct {
 	manifest  BackupManifest
 
 	insecure bool
+	cryptConfig *CryptConfig
 
 	client    http.Client
 	tlsConfig tls.Config
@@ -127,8 +128,12 @@ func (pbs *PBSClient) CreateDynamicIndex(name string) (uint64, error) {
 	}
 	fmt.Println("Writer id: ", R.WriterID)
 	defer resp2.Body.Close()
+	cryptMode := "none"
+	if pbs.cryptConfig != nil {
+		cryptMode = "encrypt"
+	}
 	f := File{
-		CryptMode: "none",
+		CryptMode: cryptMode,
 		Csum:      "",
 		Filename:  name,
 		Size:      0,
@@ -345,12 +350,13 @@ func (pbs *PBSClient) Connect(reader bool) {
 			}
 
 			// Calculate the SHA-256 fingerprint of the certificate
-			expectedFingerprint := strings.ReplaceAll(pbs.certfingerprint, ":", "")
+			expectedFingerprint := strings.ToLower(strings.ReplaceAll(pbs.certfingerprint, ":", ""))
 			calculatedFingerprint := sha256.Sum256(peerCert.Raw)
+			calculatedFingerprintStr := strings.ToLower(hex.EncodeToString(calculatedFingerprint[:]))
 
-			// Compare the calculated fingerprint with the expected one
-			if hex.EncodeToString(calculatedFingerprint[:]) != expectedFingerprint {
-				return fmt.Errorf("certificate fingerprint does not match (%s,%s)", expectedFingerprint, hex.EncodeToString(calculatedFingerprint[:]))
+			// Compare the calculated fingerprint with the expected one (case-insensitive)
+			if calculatedFingerprintStr != expectedFingerprint {
+				return fmt.Errorf("certificate fingerprint does not match (%s,%s)", expectedFingerprint, calculatedFingerprintStr)
 			}
 
 			// If the fingerprint matches, the certificate is considered valid
@@ -453,4 +459,33 @@ func (pbs *PBSClient) DownloadPreviousToBytes(archivename string) ([]byte, error
 
 	return ret, nil
 
+}
+
+func (pbs *PBSClient) CheckPreviousEncryptionMode() (bool, error) {
+	manifestData, err := pbs.DownloadPreviousToBytes("index.json.blob")
+	if err != nil {
+		fmt.Printf("Could not download previous manifest (this is normal for first backup): %v\n", err)
+		return false, nil // No previous backup, no conflict
+	}
+
+	// Skip blob header (magic + crc32 = 12 bytes)
+	if len(manifestData) < 12 {
+		return false, fmt.Errorf("manifest data too short")
+	}
+	manifestJSON := manifestData[12:]
+
+	var prevManifest BackupManifest
+	err = json.Unmarshal(manifestJSON, &prevManifest)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse previous manifest: %v", err)
+	}
+
+	// Check if any file in previous backup was encrypted
+	for _, file := range prevManifest.Files {
+		if file.CryptMode == "encrypt" {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }

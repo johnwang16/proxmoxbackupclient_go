@@ -6,12 +6,11 @@ The software is still alpha quality and i take no responsability for any kind of
 Contributions are welcome especially 
 
 1. GUI with tray icon to show backup progress and backup taking place
-2. Encryption support
-3. A GUI way of configuring it and maybe create a json job file similiar freefilesync does
-4. Async upload / compress and multicore upload + compression of chunks
-5. Proxmox side patch to add another kind of entry to pxar format with Windows security descriptors in it
-6. Support for windows symlinks
-7. Anything interesting you can come up with :)
+2. A GUI way of configuring it and maybe create a json job file similiar freefilesync does
+3. Async upload / compress and multicore upload + compression of chunks
+4. Proxmox side patch to add another kind of entry to pxar format with Windows security descriptors in it
+5. Support for windows symlinks
+6. Anything interesting you can come up with :)
 
 Usage
 =====
@@ -65,12 +64,25 @@ proxmoxbackupgo.exe
   -mail-body-template string
         mail notification system: mail body template(optional)
 
+  -encryption-key-path string
+        Path to encryption key file (optional)
+  -encryption-password string
+        Password for encrypted key file (optional)
+  -master-key-path string
+        Path to RSA master key for key recovery (optional)
+  -force-full-backup bool
+        Force a full backup, ignoring previous backup for incremental deduplication (optional)
+
   -config string
         Path to JSON config file. If this flag is provided all the others will override the loaded config file
 
 ```
 
-For JSON configuration a JSON example is provided, fill in only the needed fields.
+For JSON configuration examples are provided:
+- `config.json.example` - Basic configuration
+- `config.json.encryption.example` - Configuration with encryption enabled
+
+Fill in only the needed fields.
 
 
 Note on mail templating:
@@ -97,6 +109,47 @@ mysqldump yourdatabase | ./proxmoxbackupgo -backupstream yourdatabase.sql [other
 ```
 
 This allows leveraging buzhash for dedup even when using tar for example, or the sql dump itself, and if someone wants to attempt it should be possible with some hack to pipe DISM command to generate WIM image to this and have full host backup
+
+Encryption
+==========
+
+This client supports PBS-compatible client-side encryption with:
+- AES-256-GCM encryption algorithm
+- PBKDF2 key derivation function 
+- Master key support for key recovery
+- JSON key file format compatible with proxmox-backup-client
+
+To use encryption:
+1. Create an encryption key using `proxmox-backup-client key create` or any PBS-compatible tool
+2. Specify the key file path with `-encryption-key-path` parameter
+3. Provide the key password with `-encryption-password` parameter (if key is password-protected)
+4. Optionally specify a master key with `-master-key-path` parameter for recovery purposes
+
+Example with encryption:
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backupdir "C:\data" -encryption-key-path "backup.key" -encryption-password "mypass123"
+```
+
+Force Full Backup
+==================
+
+The `-force-full-backup` flag disables incremental backup and forces a complete backup of all data. 
+
+**Automatic Detection**: The client now automatically detects when switching between encrypted and unencrypted modes and forces a full backup to prevent chunk format mismatches. You'll see a message like:
+```
+Encryption mode mismatch detected (current: true, previous: false) - forcing full backup
+```
+
+**Manual Override**: You can still manually force full backups when needed for:
+
+1. **Recovery scenarios**: After corruption or when you want to ensure a clean backup baseline
+2. **Storage migration**: When moving to a new backup repository
+3. **Troubleshooting**: When incremental backups aren't working as expected
+
+Example forcing full backup:
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backupdir "C:\data" -force-full-backup
+```
 
 Known Issues
 ============

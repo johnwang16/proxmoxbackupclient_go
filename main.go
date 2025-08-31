@@ -42,6 +42,7 @@ type ChunkState struct {
 	newchunk *atomic.Uint64 
 	reusechunk *atomic.Uint64
 	knownChunks *hashmap.Map[string, bool]
+	cryptConfig *CryptConfig
 }
 
 type DidxEntry struct {
@@ -49,15 +50,23 @@ type DidxEntry struct {
 	digest []byte
 }
 
-func (c *ChunkState) Init(newchunk *atomic.Uint64 , reusechunk *atomic.Uint64, knownChunks *hashmap.Map[string, bool] ) {
+func (c *ChunkState) Init(newchunk *atomic.Uint64 , reusechunk *atomic.Uint64, knownChunks *hashmap.Map[string, bool], cryptConfig *CryptConfig ) {
 	c.assignments = make([]string, 0)
 	c.assignments_offset = make([]uint64, 0)
 	c.pos = 0
 	c.chunkcount = 0
 	c.chunkdigests = sha256.New()
 	c.current_chunk = make([]byte, 0)
+	c.cryptConfig = cryptConfig
+	
+	chunkAvgSize := uint64(1024 * 1024 * 4)  // 4MB average
+	if cryptConfig != nil {
+		// Reduce chunk size to account for encryption overhead (28 bytes for AES-GCM)
+		// Use safety margin to ensure max chunks stay under PBS 16MB limit
+		chunkAvgSize = uint64((1024 * 1024 * 4) - 100)
+	}
 	c.C = Chunker{}
-	c.C.New(1024 * 1024 * 4)
+	c.C.New(chunkAvgSize)
 	c.reusechunk = reusechunk
 	c.newchunk = newchunk
 	c.knownChunks = knownChunks
@@ -81,13 +90,23 @@ func (c *ChunkState) HandleData(b []byte, client *PBSClient){
 			bindigest := h.Sum(nil)
 			shahash := hex.EncodeToString(bindigest)
 
+			chunkData := c.current_chunk
+			if c.cryptConfig != nil {
+				var err error
+				chunkData, err = c.cryptConfig.EncryptChunk(c.current_chunk)
+				if err != nil {
+					fmt.Printf("Encryption failed: %v\n", err)
+					return
+				}
+			}
+
 			if _, ok := c.knownChunks.GetOrInsert(shahash, true); !ok {
-				fmt.Printf("New chunk[%s] %d bytes\n", shahash, len(c.current_chunk))
+				fmt.Printf("New chunk[%s] %d bytes\n", shahash, len(chunkData))
 				c.newchunk.Add(1)
 
-				client.UploadCompressedChunk(c.wrid, shahash, c.current_chunk)
+				client.UploadCompressedChunk(c.wrid, shahash, chunkData)
 			} else {
-				fmt.Printf("Reuse chunk[%s] %d bytes\n", shahash, len(c.current_chunk))
+				fmt.Printf("Reuse chunk[%s] %d bytes\n", shahash, len(chunkData))
 				c.reusechunk.Add(1)
 			}
 
@@ -123,15 +142,26 @@ func (c *ChunkState) Eof(client *PBSClient) {
 		}
 
 		shahash := hex.EncodeToString(h.Sum(nil))
+
+		chunkData := c.current_chunk
+		if c.cryptConfig != nil {
+			var err error
+			chunkData, err = c.cryptConfig.EncryptChunk(c.current_chunk)
+			if err != nil {
+				fmt.Printf("Encryption failed: %v\n", err)
+				return
+			}
+		}
+
 		binary.Write(c.chunkdigests, binary.LittleEndian, (c.pos + uint64(len(c.current_chunk))))
 		c.chunkdigests.Write(h.Sum(nil))
 
 		if _, ok := c.knownChunks.GetOrInsert(shahash, true); !ok {
-			fmt.Printf("New chunk[%s] %d bytes\n", shahash, len(c.current_chunk))
-			client.UploadCompressedChunk(c.wrid, shahash, c.current_chunk)
+			fmt.Printf("New chunk[%s] %d bytes\n", shahash, len(chunkData))
+			client.UploadCompressedChunk(c.wrid, shahash, chunkData)
 			c.newchunk.Add(1)
 		} else {
-			fmt.Printf("Reuse chunk[%s] %d bytes\n", shahash, len(c.current_chunk))
+			fmt.Printf("Reuse chunk[%s] %d bytes\n", shahash, len(chunkData))
 			c.reusechunk.Add(1)
 		}
 		c.assignments_offset = append(c.assignments_offset, c.pos)
@@ -159,6 +189,17 @@ func main() {
 	var reusechunk *atomic.Uint64 = new(atomic.Uint64)
 
 	cfg := loadConfig()
+
+	var cryptConfig *CryptConfig
+	if cfg.EncryptionKeyPath != "" {
+		var err error
+		cryptConfig, err = NewCryptConfig(cfg.EncryptionKeyPath, cfg.EncryptionPassword, cfg.MasterKeyPath)
+		if err != nil {
+			fmt.Printf("Failed to initialize encryption: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Encryption enabled")
+	}
 
 	if ok := cfg.valid(); !ok {
 		if runtime.GOOS == "windows" {
@@ -207,6 +248,7 @@ func main() {
 		datastore:       cfg.Datastore,
 		namespace:       cfg.Namespace,
 		insecure:        insecure,
+		cryptConfig:     cryptConfig,
 		manifest: BackupManifest{
 			BackupID: cfg.BackupID,
 		},
@@ -219,14 +261,14 @@ func main() {
 
 	begin := time.Now()
 	if cfg.BackupSourceDir != "" {
-		err = backup(client, newchunk, reusechunk, cfg.PxarOut, cfg.BackupSourceDir)
+		err = backup(client, newchunk, reusechunk, cfg.PxarOut, cfg.BackupSourceDir, cryptConfig, cfg)
 	} else if cfg.BackupStreamName != "" {
 		sn := cfg.BackupStreamName
 		if ! strings.HasSuffix(sn, ".didx" ) {
 			sn += ".didx"
 		}
 		fmt.Printf("Backing up from STDIN to %s", sn)
-		err = backup_stream(client, newchunk, reusechunk, sn, os.Stdin )
+		err = backup_stream(client, newchunk, reusechunk, sn, os.Stdin, cryptConfig, cfg )
 
 	}else{
 		panic("No backup dir or stream name specified, exiting")
@@ -299,37 +341,56 @@ func main() {
 
 }
 
-func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filename string, stream io.Reader ) error {
+func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filename string, stream io.Reader, cryptConfig *CryptConfig, config *Config ) error {
 	knownChunks := hashmap.New[string, bool]()
 	client.Connect(false)
-	previousDidx, err := client.DownloadPreviousToBytes(filename)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
-
-	if !bytes.HasPrefix(previousDidx, didxMagic) {
-		fmt.Printf("Previous index has wrong magic (%s)!\n", previousDidx[:8])
-
-	} else {
-		//Header as per proxmox documentation is fixed size of 4096 bytes,
-		//then offset of type uint64 and sha256 digests follow , so 40 byte each record until EOF
-		previousDidx = previousDidx[4096:]
-		for i := 0; i*40 < len(previousDidx); i += 1 {
-			e := DidxEntry{}
-			e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
-			e.digest = previousDidx[i*40+8 : i*40+40]
-			shahash := hex.EncodeToString(e.digest)
-			fmt.Printf("Previous: %s\n", shahash)
-			knownChunks.Set(shahash, true)
+	
+	forceFullBackup := config.ForceFullBackup
+	
+	// Auto-detect encryption mode mismatch
+	if !forceFullBackup {
+		currentlyEncrypted := (cryptConfig != nil)
+		previouslyEncrypted, err := client.CheckPreviousEncryptionMode()
+		if err != nil {
+			fmt.Printf("Warning: Could not check previous encryption mode: %v\n", err)
+		} else if currentlyEncrypted != previouslyEncrypted {
+			fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
+			forceFullBackup = true
 		}
+	}
+	
+	if !forceFullBackup {
+		previousDidx, err := client.DownloadPreviousToBytes(filename)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
+
+		if !bytes.HasPrefix(previousDidx, didxMagic) {
+			fmt.Printf("Previous index has wrong magic (%s)!\n", previousDidx[:8])
+
+		} else {
+			//Header as per proxmox documentation is fixed size of 4096 bytes,
+			//then offset of type uint64 and sha256 digests follow , so 40 byte each record until EOF
+			previousDidx = previousDidx[4096:]
+			for i := 0; i*40 < len(previousDidx); i += 1 {
+				e := DidxEntry{}
+				e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
+				e.digest = previousDidx[i*40+8 : i*40+40]
+				shahash := hex.EncodeToString(e.digest)
+				fmt.Printf("Previous: %s\n", shahash)
+				knownChunks.Set(shahash, true)
+			}
+		}
+	} else {
+		fmt.Printf("Full backup mode - skipping previous DIDX download\n")
 	}
 
 	fmt.Printf("Known chunks: %d!\n", knownChunks.Len())
 
 	streamChunk := ChunkState{}
-	streamChunk.Init(newchunk, reusechunk, knownChunks)
+	streamChunk.Init(newchunk, reusechunk, knownChunks, cryptConfig)
 
 	streamChunk.wrid, err = client.CreateDynamicIndex(filename)
 	if err != nil {
@@ -361,7 +422,7 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 	return client.Finish()
 }
 
-func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut string, backupdir string) error {
+func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut string, backupdir string, cryptConfig *CryptConfig, config *Config) error {
 	knownChunks := hashmap.New[string, bool]()
 
 	fmt.Printf("Starting backup of %s\n", backupdir)
@@ -375,38 +436,56 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	archive := &PXARArchive{}
 	archive.archivename = "backup.pxar.didx"
 
-	previousDidx, err := client.DownloadPreviousToBytes(archive.archivename)
-	if err != nil {
-		return err
+	forceFullBackup := config.ForceFullBackup
+	
+	// Auto-detect encryption mode mismatch
+	if !forceFullBackup {
+		currentlyEncrypted := (cryptConfig != nil)
+		previouslyEncrypted, err := client.CheckPreviousEncryptionMode()
+		if err != nil {
+			fmt.Printf("Warning: Could not check previous encryption mode: %v\n", err)
+		} else if currentlyEncrypted != previouslyEncrypted {
+			fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
+			forceFullBackup = true
+		}
 	}
 
-	fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
-
-	/*f2, _ := os.Create("test.didx")
-	defer f2.Close()
-
-	f2.Write(previous_didx)*/
-
-	/*
-		Here we download the previous dynamic index to figure out which chunks are the same of what
-		we are going to upload to avoid unnecessary traffic and compression cpu usage
-	*/
-
-	if !bytes.HasPrefix(previousDidx, didxMagic) {
-		fmt.Printf("Previous index has wrong magic (%s)!\n", previousDidx[:8])
-
-	} else {
-		//Header as per proxmox documentation is fixed size of 4096 bytes,
-		//then offset of type uint64 and sha256 digests follow , so 40 byte each record until EOF
-		previousDidx = previousDidx[4096:]
-		for i := 0; i*40 < len(previousDidx); i += 1 {
-			e := DidxEntry{}
-			e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
-			e.digest = previousDidx[i*40+8 : i*40+40]
-			shahash := hex.EncodeToString(e.digest)
-			fmt.Printf("Previous: %s\n", shahash)
-			knownChunks.Set(shahash, true)
+	if !forceFullBackup {
+		previousDidx, err := client.DownloadPreviousToBytes(archive.archivename)
+		if err != nil {
+			return err
 		}
+
+		fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
+
+		/*f2, _ := os.Create("test.didx")
+		defer f2.Close()
+
+		f2.Write(previous_didx)*/
+
+		/*
+			Here we download the previous dynamic index to figure out which chunks are the same of what
+			we are going to upload to avoid unnecessary traffic and compression cpu usage
+		*/
+
+		if !bytes.HasPrefix(previousDidx, didxMagic) {
+			fmt.Printf("Previous index has wrong magic (%s)!\n", previousDidx[:8])
+
+		} else {
+			//Header as per proxmox documentation is fixed size of 4096 bytes,
+			//then offset of type uint64 and sha256 digests follow , so 40 byte each record until EOF
+			previousDidx = previousDidx[4096:]
+			for i := 0; i*40 < len(previousDidx); i += 1 {
+				e := DidxEntry{}
+				e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
+				e.digest = previousDidx[i*40+8 : i*40+40]
+				shahash := hex.EncodeToString(e.digest)
+				fmt.Printf("Previous: %s\n", shahash)
+				knownChunks.Set(shahash, true)
+			}
+		}
+	} else {
+		fmt.Printf("Full backup mode - skipping previous DIDX download\n")
 	}
 
 	fmt.Printf("Known chunks: %d!\n", knownChunks.Len())
@@ -421,10 +500,10 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	/**/
 
 	pxarChunk := ChunkState{}
-	pxarChunk.Init(newchunk, reusechunk, knownChunks)
+	pxarChunk.Init(newchunk, reusechunk, knownChunks, cryptConfig)
 
 	pcat1Chunk := ChunkState{}
-	pcat1Chunk.Init(newchunk, reusechunk, knownChunks)
+	pcat1Chunk.Init(newchunk, reusechunk, knownChunks, cryptConfig)
 
 	pxarChunk.wrid, err = client.CreateDynamicIndex(archive.archivename)
 	if err != nil {
