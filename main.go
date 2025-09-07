@@ -21,12 +21,6 @@ import (
 	"github.com/tawesoft/golib/v2/dialog"
 )
 
-func min64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
-}
 
 
 
@@ -823,7 +817,7 @@ func (r *RestoreReader) Read(p []byte) (n int, err error) {
 	// Calculate how much we can read from current buffer
 	bufferPos := r.currentPos - r.dataOffset
 	availableInBuffer := int64(len(r.data)) - bufferPos
-	toRead := min64(int64(len(p)), availableInBuffer)
+	toRead := min(int64(len(p)), availableInBuffer)
 	
 	// Copy data to output buffer
 	copy(p, r.data[bufferPos:bufferPos+toRead])

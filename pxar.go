@@ -15,12 +15,6 @@ import (
 	"github.com/dchest/siphash"
 )
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
 
 const (
 	PXAR_ENTRY               uint64 = 0xd5956474e588acef
