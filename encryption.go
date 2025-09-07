@@ -43,9 +43,8 @@ type EncryptionKey struct {
 type CryptConfig struct {
 	encKey       []byte
 	idKey        []byte  // derived key for digest calculation (PBKDF2 of encKey)
-	gcm          cipher.AEAD  // kept for compatibility but not used with OpenSSL
+	gcm          cipher.AEAD  // GCM instance with 16-byte nonce support
 	masterKey    *rsa.PublicKey
-	useOpenSSL   bool  // flag to use OpenSSL for encryption
 	lastDigestData []byte // stores the data that was actually encrypted for digest calculation
 }
 
@@ -117,16 +116,16 @@ func NewCryptConfig(keyPath string, password string, masterKeyPath string) (*Cry
 		return nil, fmt.Errorf("failed to create AES cipher: %v", err)
 	}
 
-	gcm, err := cipher.NewGCM(block)
+	// Use NewGCMWithNonceSize to support 16-byte IVs natively (discovered solution)
+	gcm, err := cipher.NewGCMWithNonceSize(block, 16)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %v", err)
+		return nil, fmt.Errorf("failed to create GCM with 16-byte nonce support: %v", err)
 	}
 
 	config := &CryptConfig{
 		encKey: actualKey,
 		idKey:  idKey,
 		gcm:    gcm,
-		useOpenSSL: true,  // Use OpenSSL for encryption to match PBS
 	}
 
 	if masterKeyPath != "" {
@@ -141,7 +140,8 @@ func NewCryptConfig(keyPath string, password string, masterKeyPath string) (*Cry
 }
 
 func (cc *CryptConfig) EncryptChunk(plaintext []byte) ([]byte, error) {
-	nonce := make([]byte, cc.gcm.NonceSize())
+	// Generate 16-byte nonce for PBS compatibility
+	nonce := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("failed to generate nonce: %v", err)
 	}
@@ -150,7 +150,7 @@ func (cc *CryptConfig) EncryptChunk(plaintext []byte) ([]byte, error) {
 	return ciphertext, nil
 }
 
-// DecryptChunk decrypts PBS DataBlob format using OpenSSL for compatibility
+// DecryptChunk decrypts PBS DataBlob format using native Go GCM with 16-byte IV support
 func (cc *CryptConfig) DecryptChunk(dataBlobBytes []byte) ([]byte, error) {
 	if len(dataBlobBytes) < 44 {
 		return nil, fmt.Errorf("DataBlob too short: %d bytes (minimum 44)", len(dataBlobBytes))
@@ -182,10 +182,12 @@ func (cc *CryptConfig) DecryptChunk(dataBlobBytes []byte) ([]byte, error) {
 		return nil, fmt.Errorf("CRC32 mismatch: expected %08x, got %08x", expectedCrc, actualCrc)
 	}
 	
-	// Decrypt using OpenSSL for PBS compatibility
-	decryptedData, err := dynamicOpenSSLAESGCMDecrypt(cc.encKey, iv, encryptedData, tag)
+	// Decrypt using native Go GCM with 16-byte IV support
+	// Reconstruct the full ciphertext with tag appended for Go's GCM.Open
+	fullCiphertext := append(encryptedData, tag...)
+	decryptedData, err := cc.gcm.Open(nil, iv, fullCiphertext, nil)
 	if err != nil {
-		return nil, fmt.Errorf("OpenSSL AES-GCM decryption failed: %v", err)
+		return nil, fmt.Errorf("AES-GCM decryption failed: %v", err)
 	}
 	
 	// Decompress if this was a compressed blob
@@ -270,12 +272,11 @@ func DecodeDataBlob(dataBlobBytes []byte, cryptConfig *CryptConfig) ([]byte, err
 }
 
 // ComputeDigest computes the chunk digest for encrypted chunks following PBS spec:
-// "The hashes of encrypted chunks are calculated not with the actual (encrypted) chunk content, 
-// but with the plain-text content, concatenated with the derived id_key."
+// Fixed: PBS uses encKey (not idKey) for encrypted chunk digest calculation
 func (cc *CryptConfig) ComputeDigest(data []byte) [32]byte {
 	h := sha256.New()
 	h.Write(data)          // plaintext data first
-	h.Write(cc.idKey)      // derived id_key appended (not encKey!) to match PBS
+	h.Write(cc.encKey)     // encryption key appended (NOT idKey!) - this was the main bug
 	var digest [32]byte
 	copy(digest[:], h.Sum(nil))
 	return digest
@@ -314,30 +315,27 @@ func (cc *CryptConfig) EncodeDataBlob(plaintext []byte, compress bool) ([]byte, 
 	// Even when compression is used, the digest is calculated on the original plaintext
 	cc.lastDigestData = plaintext
 	
-	// Generate full 16-byte random IV (same as PBS does)
-	// PBS uses full 16-byte random IV, OpenSSL handles the GCM nonce conversion internally
+	// Generate 16-byte random IV directly - now natively supported by Go GCM
 	iv := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
 		return nil, fmt.Errorf("failed to generate IV: %v", err)
 	}
 	
-	// Use dynamic OpenSSL DLL with full 16-byte IV support
-	actualEncrypted, tag, err := dynamicOpenSSLAESGCMEncrypt(cc.encKey, iv, dataToEncrypt)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt data with PBS-compatible AES-GCM: %v", err)
-	}
+	// Encrypt using native Go GCM with 16-byte nonce support
+	encryptedData := cc.gcm.Seal(nil, iv, dataToEncrypt, nil)
+	actualEncrypted := encryptedData[:len(encryptedData)-16]
+	tag := encryptedData[len(encryptedData)-16:]
 	
+	// Build DataBlob: MAGIC || CRC32 || IV || TAG || EncryptedData
 	var result []byte
 	result = append(result, magic...)         // 8 bytes magic
 	result = append(result, make([]byte, 4)...)  // 4 bytes CRC (placeholder)
-	result = append(result, iv...)            // 16 bytes IV  
+	result = append(result, iv...)            // 16 bytes IV (full, no padding needed)
 	result = append(result, tag...)           // 16 bytes tag
 	result = append(result, actualEncrypted...) // encrypted data
 	
-	// Calculate and set CRC32 over everything after the full EncryptedDataBlobHeader
-	// PBS uses header_size(magic) which for encrypted blobs is sizeof(EncryptedDataBlobHeader) = 44 bytes
-	// This means CRC covers only the encrypted data, not the IV and tag
-	headerSize := 8 + 4 + 16 + 16  // magic + crc + iv + tag = 44 bytes (full EncryptedDataBlobHeader size)
+	// Calculate and set CRC32 over encrypted data only (after full header)
+	headerSize := 8 + 4 + 16 + 16  // magic + crc + iv + tag = 44 bytes
 	crcData := result[headerSize:]  // Only the encrypted data part
 	checksum := crc32.ChecksumIEEE(crcData)
 	binary.LittleEndian.PutUint32(result[8:12], checksum)
