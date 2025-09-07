@@ -43,6 +43,7 @@ var catalog_magic = []byte{145, 253, 96, 249, 196, 103, 88, 213}
 var pxar_entry_magic_le = []byte{0xef, 0xac, 0x88, 0xe5, 0x74, 0x64, 0x95, 0xd5}    // PXAR_ENTRY
 var pxar_filename_magic_le = []byte{0xb3, 0x17, 0x39, 0x06, 0x21, 0x11, 0x70, 0x16} // PXAR_FILENAME
 var pxar_payload_magic_le = []byte{0x25, 0x1a, 0x7c, 0x0b, 0x1b, 0x7a, 0x14, 0x28}  // PXAR_PAYLOAD
+var pxar_goodbye_magic_le = []byte{0x1d, 0x73, 0xd5, 0x42, 0xa6, 0x4f, 0xec, 0x2f}  // PXAR_GOODBYE
 
 // PXAR entry header structure
 type PXARHeader struct {
@@ -536,20 +537,37 @@ func extractPXARRecursive(reader io.ReadSeeker, baseDir string, currentPath stri
 		var header PXARHeader
 		err := binary.Read(reader, binary.LittleEndian, &header)
 		if err != nil {
-			if err.Error() == "EOF" {
+			if err == io.EOF || err.Error() == "EOF" {
 				return nil // End of file
 			}
 			return fmt.Errorf("failed to read PXAR header: %v", err)
+		}
+		
+		// Validate header length to prevent seeking beyond stream
+		if header.Length < 16 || header.Length > 0x7FFFFFFF {
+			return fmt.Errorf("invalid PXAR header length: %d (type: 0x%x)", header.Length, header.Type)
 		}
 		
 		// Handle different PXAR entry types
 		switch header.Type {
 		case PXAR_ENTRY, PXAR_ENTRY_V1:
 			// Read entry metadata
+			entryDataLength := header.Length - 16 // Subtract header size
+			
 			var entry PXAREntry
 			err = binary.Read(reader, binary.LittleEndian, &entry)
 			if err != nil {
 				return fmt.Errorf("failed to read PXAR entry: %v", err)
+			}
+			
+			// Skip any remaining entry data to stay aligned
+			structSize := int64(40) // Size of PXAREntry struct
+			remaining := int64(entryDataLength) - structSize
+			if remaining > 0 {
+				_, err = reader.Seek(remaining, 1)
+				if err != nil {
+					return fmt.Errorf("failed to skip remaining PXAR_ENTRY data: %v", err)
+				}
 			}
 			
 			// Process the entry based on file type
@@ -651,50 +669,17 @@ func extractPXARRecursive(reader io.ReadSeeker, baseDir string, currentPath stri
 			// Skip unknown entry types
 			skipLength := header.Length - 16
 			if skipLength > 0 {
-				_, err = reader.Seek(int64(skipLength), 1)
-				if err != nil {
-					return fmt.Errorf("failed to skip unknown entry type %x: %v", header.Type, err)
+				// Check if we can safely skip this amount
+				currentPos, _ := reader.Seek(0, 1)
+				newPos, err := reader.Seek(int64(skipLength), 1)
+				if err != nil || newPos < currentPos {
+					return fmt.Errorf("failed to skip unknown entry type 0x%x (length %d): %v", header.Type, skipLength, err)
 				}
 			}
 		}
 		
-		// PXAR alignment - find the next valid header
-		pos, _ := reader.Seek(0, 1)
-		
-		foundValidHeader := false
-		if pos % 8 != 0 {
-			// Scan for the next valid PXAR header magic bytes
-			reader.Seek(pos, 0)
-			scanBuffer := make([]byte, 32)
-			bytesRead, scanErr := reader.Read(scanBuffer)
-			if scanErr == nil && bytesRead >= 16 {
-				// Magic bytes for different PXAR entry types (little-endian)
-				magicBytes := [][]byte{
-					pxar_entry_magic_le,    // PXAR_ENTRY
-					pxar_filename_magic_le, // PXAR_FILENAME
-					pxar_payload_magic_le,  // PXAR_PAYLOAD
-				}
-				
-				for _, magic := range magicBytes {
-					for i := 0; i <= bytesRead-8; i++ {
-						if bytes.Equal(scanBuffer[i:i+8], magic) {
-							reader.Seek(pos+int64(i), 0)
-							foundValidHeader = true
-							break
-						}
-					}
-					if foundValidHeader {
-						break
-					}
-				}
-			}
-			
-			if !foundValidHeader {
-				// Use standard 8-byte alignment as fallback
-				alignBytes := 8 - (pos % 8)
-				reader.Seek(pos+int64(alignBytes), 0)
-			}
-		}
+		// PXAR entries are naturally aligned - no manual alignment needed
+		// Each entry header specifies its exact length including any necessary padding
 	}
 }
 

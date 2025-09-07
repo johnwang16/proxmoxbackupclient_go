@@ -789,7 +789,6 @@ func restorePXAR(client *PBSClient, outputDir string, cryptConfig *CryptConfig, 
 	}
 	
 	fmt.Printf("Files extracted to: %s\n", outputDir)
-	fmt.Printf("Restore completed successfully\n")
 	return nil
 }
 
