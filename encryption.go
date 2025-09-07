@@ -99,8 +99,19 @@ func NewCryptConfig(keyPath string, password string, masterKeyPath string) (*Cry
 		tag := encryptedData[16:32]
 		encryptedKeyData := encryptedData[32:]
 		
-		// Decrypt the actual encryption key using OpenSSL DLL (matching PBS)
-		actualKey, err2 = dynamicOpenSSLAESGCMDecrypt(derivedKey, iv, encryptedKeyData, tag)
+		// Decrypt the actual encryption key using native Go GCM with 16-byte IV
+		tempBlock, err2 := aes.NewCipher(derivedKey)
+		if err2 != nil {
+			return nil, fmt.Errorf("failed to create temporary AES cipher: %v", err2)
+		}
+		tempGCM, err2 := cipher.NewGCMWithNonceSize(tempBlock, 16)
+		if err2 != nil {
+			return nil, fmt.Errorf("failed to create temporary GCM: %v", err2)
+		}
+		
+		// Reconstruct full ciphertext for Go GCM
+		fullCiphertext := append(encryptedKeyData, tag...)
+		actualKey, err2 = tempGCM.Open(nil, iv, fullCiphertext, nil)
 		if err2 != nil {
 			return nil, fmt.Errorf("failed to decrypt encryption key: %v", err2)
 		}
