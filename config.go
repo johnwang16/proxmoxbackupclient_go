@@ -45,14 +45,13 @@ type Config struct {
 	SMTP                 *SMTPConfig `json:"smtp"`
 	
 	// Restore options
-	RestoreMode          bool        `json:"restore"`
 	RestoreArchive       string      `json:"restore-archive"`
 	RestoreOutput        string      `json:"restore-output"`
 	RestoreSnapshot      string      `json:"restore-snapshot"`  // backup timestamp, e.g., "2024-01-01T12:00:00Z"
 	ListSnapshots        bool        `json:"list-snapshots"`
 }
 
-func (c *Config) valid() bool {
+func (c *Config) valid(isRestore bool) bool {
 	// Base connection requirements for both backup and restore
 	baseValid := c.BaseURL != "" && c.AuthID != "" && c.Secret != "" && c.Datastore != ""
 	if !baseValid {
@@ -65,8 +64,8 @@ func (c *Config) valid() bool {
 	}
 	
 	// Restore mode validation
-	if c.RestoreMode {
-		return c.RestoreArchive != "" && c.RestoreOutput != "" && c.RestoreSnapshot != ""
+	if isRestore {
+		return c.RestoreOutput != ""  // Only output path is required for restore
 	}
 	
 	// Backup mode validation
@@ -89,7 +88,7 @@ func (c *Config) valid() bool {
 	return true
 }
 
-func loadConfig() *Config {
+func loadConfig() (*Config, bool) {
 	// Define flags
 	baseURLFlag := flag.String("baseurl", "", "Base URL for the proxmox backup server, example: https://192.168.1.10:8007")
 	certFingerprintFlag := flag.String("certfingerprint", "", "Certificate fingerprint for SSL connection, example: ea:7d:06:f9...")
@@ -118,10 +117,10 @@ func loadConfig() *Config {
 	forceFullBackupFlag := flag.Bool("force-full-backup", false, "Force a full backup, ignoring previous backup for incremental deduplication (optional)")
 
 	// Restore flags
-	restoreModeFlag := flag.Bool("restore", false, "Enable restore mode")
-	restoreArchiveFlag := flag.String("restore-archive", "", "Archive name to restore (e.g., backup.pxar.didx)")
-	restoreOutputFlag := flag.String("restore-output", "", "Output path for restored data")
-	restoreSnapshotFlag := flag.String("restore-snapshot", "", "Backup snapshot timestamp (e.g., 2024-01-01T12:00:00Z) or 'latest' for most recent")
+	restoreModeFlag := flag.Bool("restore", false, "Enable restore mode instead of backup mode")
+	restoreArchiveFlag := flag.String("restore-archive", "backup.pxar.didx", "Archive name to restore (defaults to backup.pxar.didx)")
+	restoreOutputFlag := flag.String("restore-output", "", "Output path for restored data (required when using -restore)")
+	restoreSnapshotFlag := flag.String("restore-snapshot", "latest", "Backup snapshot timestamp (e.g., 2024-01-01T12:00:00Z) or 'latest' for most recent (default: latest)")
 	listSnapshotsFlag := flag.Bool("list-snapshots", false, "List available backup snapshots and exit")
 
 	configFile := flag.String("config", "", "Path to JSON config file. If this flag is provided all the others will override the loaded config file")
@@ -236,18 +235,14 @@ func loadConfig() *Config {
 		config.ForceFullBackup = *forceFullBackupFlag
 	}
 
-	// Set restore flags
-	config.RestoreMode = *restoreModeFlag
-	if *restoreArchiveFlag != "" {
-		config.RestoreArchive = *restoreArchiveFlag
-	}
+	// Set restore flags - archive and snapshot have defaults
+	config.RestoreArchive = *restoreArchiveFlag  // Default: "backup.pxar.didx"
 	if *restoreOutputFlag != "" {
 		config.RestoreOutput = *restoreOutputFlag
 	}
-	if *restoreSnapshotFlag != "" {
-		config.RestoreSnapshot = *restoreSnapshotFlag
-	}
+	config.RestoreSnapshot = *restoreSnapshotFlag  // Default: "latest"
 	config.ListSnapshots = *listSnapshotsFlag
 
-	return config
+	// Return config and restore mode flag (command-line only, not stored in config)
+	return config, *restoreModeFlag
 }

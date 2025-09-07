@@ -78,9 +78,11 @@ proxmoxbackupgo.exe
 
 ```
 
-For JSON configuration examples are provided:
-- `config.json.example` - Basic configuration
-- `config.json.encryption.example` - Configuration with encryption enabled
+For JSON configuration, several examples are provided:
+- `config.json.example` - Basic backup configuration
+- `config.json.encryption.example` - Configuration with encryption enabled for backup and restore
+- `config.combined.example.json` - Combined config supporting both backup and restore modes
+- `config.restore.example.json` - Restore-only configuration
 
 Fill in only the needed fields.
 
@@ -114,10 +116,24 @@ Encryption
 ==========
 
 This client supports PBS-compatible client-side encryption with:
-- AES-256-GCM encryption algorithm
-- PBKDF2 key derivation function 
+- AES-256-GCM encryption algorithm with 16-byte IV support
+- Scrypt key derivation function for password-protected keys
+- PBKDF2 for internal key derivation
 - Master key support for key recovery
 - JSON key file format compatible with proxmox-backup-client
+
+## Native Go Cryptography
+
+This client uses **native Go cryptographic operations** for full PBS compatibility without external dependencies:
+
+- **Pure Go AES-256-GCM encryption** using `crypto/cipher.NewGCMWithNonceSize()` for 16-byte IV support
+- **Cross-platform support** (Windows, Linux, macOS) with no runtime dependencies
+- **No CGO required** - builds as a pure Go binary
+- **Simplified deployment** - single executable with no DLL/shared library requirements
+
+**For detailed technical information about the encryption implementation, see [Encryption.md](Encryption.md)**
+
+### Using Encryption
 
 To use encryption:
 1. Create an encryption key using `proxmox-backup-client key create` or any PBS-compatible tool
@@ -129,6 +145,126 @@ Example with encryption:
 ```shell
 proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backupdir "C:\data" -encryption-key-path "backup.key" -encryption-password "mypass123"
 ```
+
+### Building
+
+The client can be built as a standard Go application:
+
+**Windows:**
+```cmd
+go build -o proxmoxbackupclient_go.exe .
+```
+
+Or use the provided build script:
+```cmd
+build.sh
+```
+
+**Linux/macOS:**
+```bash
+go build -o proxmoxbackupclient_go .
+```
+
+No special build flags or external libraries are required for encryption support.
+
+Restore Operations
+==================
+
+This client supports full restore operations for both encrypted and unencrypted PBS backups, including PXAR archives and stream backups.
+
+### List Available Snapshots
+
+Before restoring, you can list all available backup snapshots:
+
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -list-snapshots
+```
+
+This will show available snapshots with timestamps, files, and encryption status.
+
+### Restore Parameters
+
+```
+  -restore
+        Enable restore mode instead of backup mode
+  -restore-archive string
+        Archive name to restore (defaults to "backup.pxar.didx")
+  -restore-output string
+        Output path for restored data (required when using -restore)
+  -restore-snapshot string
+        Backup snapshot timestamp (e.g., "1704110400" or "2024-01-01T12:00:00Z") 
+        or 'latest' for most recent (default: "latest")
+```
+
+### How Restore Works
+
+1. **Snapshot Resolution**: The client first fetches the list of available snapshots from PBS
+2. **Snapshot Selection**: 
+   - If `-restore-snapshot` is "latest" or omitted, selects the most recent snapshot
+   - If a timestamp is provided, finds the exact matching snapshot
+3. **Data Retrieval**: Downloads and decrypts/decompresses chunks as needed
+4. **PXAR Extraction**: For PXAR archives, extracts all files and directories with proper permissions
+
+### Restore Examples
+
+**Basic restore (uses defaults: backup.pxar.didx, latest snapshot):**
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore -restore-output "C:\restored"
+```
+
+**Restore specific snapshot with encryption:**
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore -restore-output "C:\restored" -restore-snapshot "1704110400" -encryption-key-path "backup.key" -encryption-password "mypass123"
+```
+
+**Restore stream backup to file:**
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore -restore-archive "database.sql.didx" -restore-output "C:\database-restored.sql"
+```
+
+### Using Config Files for Both Backup and Restore
+
+The same config file can contain both backup and restore settings. Use the `-restore` flag to switch modes:
+
+**Combined config file (config.json):**
+```json
+{
+  "baseurl": "https://pbs.example.com:8007",
+  "authid": "user@pbs!token",
+  "secret": "your-secret-token",
+  "datastore": "backup",
+  "backup-id": "hostname",
+  
+  "comment": "Backup settings (used when -restore flag is NOT present)",
+  "backupdir": "C:\\data",
+  "force-full-backup": false,
+  
+  "comment": "Restore settings (used when -restore flag IS present)",
+  "restore-archive": "backup.pxar.didx",
+  "restore-output": "C:\\restored",
+  "restore-snapshot": "latest",
+  
+  "comment": "Encryption settings (used for both backup and restore)",
+  "encryption-key-path": "backup.key",
+  "encryption-password": "mypass123"
+}
+```
+
+**For backup mode:**
+```shell
+proxmoxbackupgo.exe -config config.json
+```
+
+**For restore mode (same config file):**
+```shell
+proxmoxbackupgo.exe -config config.json -restore
+```
+
+**Override config values:**
+```shell
+proxmoxbackupgo.exe -config config.json -restore -restore-output "D:\\different-location"
+```
+
 
 Force Full Backup
 ==================

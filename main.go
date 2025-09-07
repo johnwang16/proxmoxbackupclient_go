@@ -223,7 +223,7 @@ func main() {
 	var newchunk *atomic.Uint64 = new(atomic.Uint64)
 	var reusechunk *atomic.Uint64 = new(atomic.Uint64)
 
-	cfg := loadConfig()
+	cfg, isRestore := loadConfig()
 
 	var cryptConfig *CryptConfig
 	if cfg.EncryptionKeyPath != "" {
@@ -238,7 +238,7 @@ func main() {
 		fmt.Printf("No encryption configured\n")
 	}
 
-	if ok := cfg.valid(); !ok {
+	if ok := cfg.valid(isRestore); !ok {
 		if runtime.GOOS == "windows" {
 			usage := "All options are mandatory:\n"
 			flag.VisitAll(func(f *flag.Flag) {
@@ -332,8 +332,8 @@ func main() {
 		os.Exit(0)
 	}
 	
-	// Handle restore mode
-	if cfg.RestoreMode {
+	// Handle restore mode (triggered by -restore flag)
+	if isRestore {
 		fmt.Printf("Starting restore mode\n")
 		
 		// Determine restore type based on archive name
@@ -679,13 +679,23 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 			}
 		}
 	} else {
-		// Parse timestamp and find matching snapshot
-		// For simplicity, we'll match by backup ID and look for closest time
-		// In production, you'd want proper timestamp parsing
+		// Parse timestamp - expecting Unix timestamp as string (e.g., "1704110400")
+		var targetTime int64
+		_, err := fmt.Sscanf(snapshotTime, "%d", &targetTime)
+		if err != nil {
+			// Try parsing as RFC3339 time format
+			parsedTime, err2 := time.Parse(time.RFC3339, snapshotTime)
+			if err2 != nil {
+				return fmt.Errorf("invalid snapshot time format: %s (expected Unix timestamp or RFC3339)", snapshotTime)
+			}
+			targetTime = parsedTime.Unix()
+		}
+		
+		// Find exact matching snapshot
 		for _, snapshot := range snapshots {
-			if snapshot.BackupID == client.manifest.BackupID {
+			if snapshot.BackupID == client.manifest.BackupID && snapshot.BackupTime == targetTime {
 				selectedSnapshot = &snapshot
-				break // Take first match for now
+				break
 			}
 		}
 	}
@@ -929,9 +939,21 @@ func createRestoreReader(client *PBSClient, archiveName string, cryptConfig *Cry
 			}
 		}
 	} else {
-		// Parse timestamp and find matching snapshot
+		// Parse timestamp - expecting Unix timestamp as string (e.g., "1704110400")
+		var targetTime int64
+		_, err := fmt.Sscanf(snapshotTime, "%d", &targetTime)
+		if err != nil {
+			// Try parsing as RFC3339 time format
+			parsedTime, err2 := time.Parse(time.RFC3339, snapshotTime)
+			if err2 != nil {
+				return nil, fmt.Errorf("invalid snapshot time format: %s (expected Unix timestamp or RFC3339)", snapshotTime)
+			}
+			targetTime = parsedTime.Unix()
+		}
+		
+		// Find exact matching snapshot
 		for _, snapshot := range snapshots {
-			if snapshot.BackupID == client.manifest.BackupID {
+			if snapshot.BackupID == client.manifest.BackupID && snapshot.BackupTime == targetTime {
 				selectedSnapshot = &snapshot
 				break
 			}
