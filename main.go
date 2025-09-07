@@ -99,17 +99,25 @@ func (c *ChunkState) HandleData(b []byte, client *PBSClient){
 			//Append data until break position
 			c.current_chunk = append(c.current_chunk, b[:chunkpos]...)
 
-			// Compute digest according to PBS spec (plaintext + key for encrypted chunks)
-			bindigest, shahash := c.computeChunkDigest(c.current_chunk)
-
 			chunkData := c.current_chunk
+			var bindigest []byte
+			var shahash string
+			
 			if c.cryptConfig != nil {
 				var err error
+				
+				// First create the encrypted DataBlob (this determines what data gets encrypted)
 				chunkData, err = c.cryptConfig.EncodeDataBlob(c.current_chunk, true)
 				if err != nil {
 					fmt.Printf("DataBlob encoding failed: %v\n", err)
 					return
 				}
+				
+				// Now calculate digest on the exact data that was encrypted (stored in lastDigestData)
+				bindigest, shahash = c.computeChunkDigest(c.cryptConfig.lastDigestData)
+			} else {
+				// Unencrypted chunks - digest on original data
+				bindigest, shahash = c.computeChunkDigest(c.current_chunk)
 			}
 
 			if _, ok := c.knownChunks.GetOrInsert(shahash, true); !ok {
@@ -152,17 +160,25 @@ func (c *ChunkState) Eof(client *PBSClient) {
 	//Here we write the remainder of data for which cyclic hash did not trigger
 	
 	if len(c.current_chunk) > 0 {
-		// Compute digest according to PBS spec (plaintext + key for encrypted chunks)
-		bindigest, shahash := c.computeChunkDigest(c.current_chunk)
-
 		chunkData := c.current_chunk
+		var bindigest []byte
+		var shahash string
+		
 		if c.cryptConfig != nil {
 			var err error
+			
+			// First create the encrypted DataBlob (this determines what data gets encrypted)
 			chunkData, err = c.cryptConfig.EncodeDataBlob(c.current_chunk, true)
 			if err != nil {
 				fmt.Printf("DataBlob encoding failed: %v\n", err)
 				return
 			}
+			
+			// Now calculate digest on the exact data that was encrypted (stored in lastDigestData)
+			bindigest, shahash = c.computeChunkDigest(c.cryptConfig.lastDigestData)
+		} else {
+			// Unencrypted chunks - digest on original data
+			bindigest, shahash = c.computeChunkDigest(c.current_chunk)
 		}
 
 		binary.Write(c.chunkdigests, binary.LittleEndian, (c.pos + uint64(len(c.current_chunk))))
@@ -196,7 +212,8 @@ func (c *ChunkState) Eof(client *PBSClient) {
 		client.AssignChunks(c.wrid, c.assignments[k:k2], c.assignments_offset[k:k2])
 	}
 
-	client.CloseDynamicIndex(c.wrid, hex.EncodeToString(c.chunkdigests.Sum(nil)), c.pos, c.chunkcount)
+	digest := hex.EncodeToString(c.chunkdigests.Sum(nil))
+	client.CloseDynamicIndex(c.wrid, digest, c.pos, c.chunkcount)
 }
 
 
@@ -216,6 +233,8 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("Encryption enabled")
+	} else {
+		fmt.Printf("No encryption configured\n")
 	}
 
 	if ok := cfg.valid(); !ok {
