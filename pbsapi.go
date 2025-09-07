@@ -373,12 +373,15 @@ func (pbs *PBSClient) UploadRawChunk(writerid uint64, digest string, chunkdata [
 	return nil
 }
 
-func (pbs *PBSClient) Connect(reader bool) {
-	pbs.writersManifest = make(map[uint64]int)
+func (pbs *PBSClient) ConnectRestore() {
+	// For restore operations, use a standard HTTP client without protocol upgrade
 	pbs.tlsConfig = tls.Config{
 		InsecureSkipVerify: pbs.insecure,
 	}
-	if pbs.insecure {
+	
+	// Only validate certificate fingerprint if not in insecure mode AND fingerprint is provided
+	if !pbs.insecure && pbs.certfingerprint != "" {
+		pbs.tlsConfig.InsecureSkipVerify = true // Skip CA validation to use custom fingerprint validation
 		pbs.tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 			// Extract the peer certificate
 			if len(rawCerts) == 0 {
@@ -404,12 +407,97 @@ func (pbs *PBSClient) Connect(reader bool) {
 		}
 	}
 
-	pbs.manifest.BackupTime = time.Now().Unix()
-	pbs.manifest.BackupType = "host"
-	if pbs.manifest.BackupID == "" {
-		hostname, _ := os.Hostname()
-		pbs.manifest.BackupID = hostname
+	// Standard HTTP client for REST API calls
+	pbs.client = http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &pbs.tlsConfig,
+		},
+		Timeout: 60 * time.Second,
 	}
+}
+
+// ConnectReader establishes a reader protocol connection for downloading data
+func (pbs *PBSClient) ConnectReader(backupType, backupID string, backupTime int64) error {
+	// Set the manifest information for the reader connection
+	pbs.manifest.BackupType = backupType
+	pbs.manifest.BackupID = backupID
+	pbs.manifest.BackupTime = backupTime
+	
+	// Use the Connect function in reader mode
+	pbs.Connect(true)
+	return nil
+}
+
+// DownloadFile downloads a file using the reader protocol /download endpoint
+func (pbs *PBSClient) DownloadFile(filename string) ([]byte, error) {
+	q := &url.Values{}
+	q.Add("file-name", filename)
+	
+	url := pbs.baseurl + "/download?" + q.Encode()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	
+	resp, err := pbs.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error downloading file: %v", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	
+	return io.ReadAll(resp.Body)
+}
+
+
+func (pbs *PBSClient) Connect(reader bool) {
+	pbs.writersManifest = make(map[uint64]int)
+	pbs.tlsConfig = tls.Config{
+		InsecureSkipVerify: pbs.insecure,
+	}
+	
+	// Only validate certificate fingerprint if not in insecure mode AND fingerprint is provided
+	if !pbs.insecure && pbs.certfingerprint != "" {
+		pbs.tlsConfig.InsecureSkipVerify = true // Skip CA validation to use custom fingerprint validation
+		pbs.tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			// Extract the peer certificate
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("no certificates presented by the peer")
+			}
+			peerCert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("failed to parse certificate: %v", err)
+			}
+
+			// Calculate the SHA-256 fingerprint of the certificate
+			expectedFingerprint := strings.ToLower(strings.ReplaceAll(pbs.certfingerprint, ":", ""))
+			calculatedFingerprint := sha256.Sum256(peerCert.Raw)
+			calculatedFingerprintStr := strings.ToLower(hex.EncodeToString(calculatedFingerprint[:]))
+
+			// Compare the calculated fingerprint with the expected one (case-insensitive)
+			if calculatedFingerprintStr != expectedFingerprint {
+				return fmt.Errorf("certificate fingerprint does not match (%s,%s)", expectedFingerprint, calculatedFingerprintStr)
+			}
+
+			// If the fingerprint matches, the certificate is considered valid
+			return nil
+		}
+	}
+
+	// Only set current time and defaults for backup mode, not restore mode
+	if !reader {
+		pbs.manifest.BackupTime = time.Now().Unix()
+		pbs.manifest.BackupType = "host"
+		if pbs.manifest.BackupID == "" {
+			hostname, _ := os.Hostname()
+			pbs.manifest.BackupID = hostname
+		}
+	}
+	// For reader mode, keep the values set by ConnectReader
 	pbs.client = http.Client{
 		Transport: &http2.Transport{
 
@@ -424,16 +512,36 @@ func (pbs *PBSClient) Connect(reader bool) {
 					return nil, err
 				}
 				q := &url.Values{}
-				q.Add("backup-time", fmt.Sprintf("%d", pbs.manifest.BackupTime))
-				q.Add("backup-type", pbs.manifest.BackupType)
-				q.Add("store", pbs.datastore)
-				if pbs.namespace != "" {
-					q.Add("ns", pbs.namespace)
+				
+				// Different parameters for reader vs backup protocol
+				if !reader {
+					// Backup protocol parameters
+					q.Add("backup-time", fmt.Sprintf("%d", pbs.manifest.BackupTime))
+					q.Add("backup-type", pbs.manifest.BackupType)
+					q.Add("store", pbs.datastore)
+					if pbs.namespace != "" {
+						q.Add("ns", pbs.namespace)
+					}
+					q.Add("backup-id", pbs.manifest.BackupID)
+				} else {
+					// Reader protocol parameters - might need different parameters
+					q.Add("backup-time", fmt.Sprintf("%d", pbs.manifest.BackupTime))
+					q.Add("backup-type", pbs.manifest.BackupType)
+					q.Add("store", pbs.datastore)
+					if pbs.namespace != "" {
+						q.Add("ns", pbs.namespace)
+					}
+					q.Add("backup-id", pbs.manifest.BackupID)
 				}
-
-				q.Add("backup-id", pbs.manifest.BackupID)
-				q.Add("debug", "1")
-				conn.Write([]byte("GET /api2/json/backup?" + q.Encode() + " HTTP/1.1\r\n"))
+				
+				// Use different endpoint for reader vs backup protocol
+				endpoint := "/api2/json/backup"
+				if reader {
+					endpoint = "/api2/json/reader"
+				}
+				
+				requestLine := "GET " + endpoint + "?" + q.Encode() + " HTTP/1.1\r\n"
+				conn.Write([]byte(requestLine))
 				conn.Write([]byte("Authorization: " + fmt.Sprintf("PBSAPIToken=%s:%s", pbs.authid, pbs.secret) + "\r\n"))
 				if !reader {
 					conn.Write([]byte("Upgrade: proxmox-backup-protocol-v1\r\n"))
@@ -529,3 +637,83 @@ func (pbs *PBSClient) CheckPreviousEncryptionMode() (bool, error) {
 
 	return false, nil
 }
+
+func (pbs *PBSClient) DownloadChunk(digest string) ([]byte, error) {
+	q := &url.Values{}
+	q.Add("digest", digest)
+
+	req, err := http.NewRequest("GET", pbs.baseurl+"/chunk?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Authorization", fmt.Sprintf("PBSAPIToken=%s:%s", pbs.authid, pbs.secret))
+
+	resp, err := pbs.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error making chunk download request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("chunk download failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	chunkData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading chunk data: %v", err)
+	}
+
+	return chunkData, nil
+}
+
+type BackupSnapshot struct {
+	BackupID   string `json:"backup-id"`
+	BackupTime int64  `json:"backup-time"`
+	BackupType string `json:"backup-type"`
+	Comment    string `json:"comment"`
+	Files      []File `json:"files"`
+}
+
+func (pbs *PBSClient) ListSnapshots() ([]BackupSnapshot, error) {
+	q := &url.Values{}
+	q.Add("backup-type", "host")
+	if pbs.namespace != "" {
+		q.Add("ns", pbs.namespace)
+	}
+
+	req, err := http.NewRequest("GET", pbs.baseurl+"/api2/json/admin/datastore/"+pbs.datastore+"/snapshots?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Authorization", fmt.Sprintf("PBSAPIToken=%s:%s", pbs.authid, pbs.secret))
+
+	resp, err := pbs.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error making snapshot list request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("snapshot list failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var response struct {
+		Data []BackupSnapshot `json:"data"`
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response body: %v", err)
+	}
+
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing snapshot list: %v", err)
+	}
+
+	return response.Data, nil
+}
+
+

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -149,18 +150,123 @@ func (cc *CryptConfig) EncryptChunk(plaintext []byte) ([]byte, error) {
 	return ciphertext, nil
 }
 
-func (cc *CryptConfig) DecryptChunk(ciphertext []byte) ([]byte, error) {
-	if len(ciphertext) < cc.gcm.NonceSize() {
-		return nil, fmt.Errorf("ciphertext too short")
+// DecryptChunk decrypts PBS DataBlob format using OpenSSL for compatibility
+func (cc *CryptConfig) DecryptChunk(dataBlobBytes []byte) ([]byte, error) {
+	if len(dataBlobBytes) < 44 {
+		return nil, fmt.Errorf("DataBlob too short: %d bytes (minimum 44)", len(dataBlobBytes))
 	}
-
-	nonce, ciphertext := ciphertext[:cc.gcm.NonceSize()], ciphertext[cc.gcm.NonceSize():]
-	plaintext, err := cc.gcm.Open(nil, nonce, ciphertext, nil)
+	
+	// Parse PBS DataBlob header
+	magic := dataBlobBytes[0:8]
+	crc32Bytes := dataBlobBytes[8:12]
+	iv := dataBlobBytes[12:28]       // 16 bytes IV
+	tag := dataBlobBytes[28:44]      // 16 bytes GCM tag
+	encryptedData := dataBlobBytes[44:]
+	
+	// Check magic bytes to determine blob type
+	var isCompressed bool
+	if bytes.Equal(magic, []byte{123, 103, 133, 190, 34, 45, 76, 240}) {
+		// ENCRYPTED_BLOB_MAGIC_1_0
+		isCompressed = false
+	} else if bytes.Equal(magic, []byte{230, 89, 27, 191, 11, 191, 216, 11}) {
+		// ENCR_COMPR_BLOB_MAGIC_1_0 
+		isCompressed = true
+	} else {
+		return nil, fmt.Errorf("unknown encrypted blob magic: %x", magic)
+	}
+	
+	// Verify CRC32 over encrypted data
+	expectedCrc := binary.LittleEndian.Uint32(crc32Bytes)
+	actualCrc := crc32.ChecksumIEEE(encryptedData)
+	if expectedCrc != actualCrc {
+		return nil, fmt.Errorf("CRC32 mismatch: expected %08x, got %08x", expectedCrc, actualCrc)
+	}
+	
+	// Decrypt using OpenSSL for PBS compatibility
+	decryptedData, err := dynamicOpenSSLAESGCMDecrypt(cc.encKey, iv, encryptedData, tag)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt: %v", err)
+		return nil, fmt.Errorf("OpenSSL AES-GCM decryption failed: %v", err)
 	}
+	
+	// Decompress if this was a compressed blob
+	if isCompressed {
+		decoder, err := zstd.NewReader(nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create zstd decoder: %v", err)
+		}
+		defer decoder.Close()
+		
+		decompressed, err := decoder.DecodeAll(decryptedData, nil)
+		if err != nil {
+			return nil, fmt.Errorf("zstd decompression failed: %v", err)
+		}
+		return decompressed, nil
+	}
+	
+	return decryptedData, nil
+}
 
-	return plaintext, nil
+// DecodeDataBlob decodes both encrypted and unencrypted PBS DataBlob formats
+func DecodeDataBlob(dataBlobBytes []byte, cryptConfig *CryptConfig) ([]byte, error) {
+	if len(dataBlobBytes) < 12 {
+		return nil, fmt.Errorf("DataBlob too short: %d bytes (minimum 12)", len(dataBlobBytes))
+	}
+	
+	// Parse magic to determine blob type
+	magic := dataBlobBytes[0:8]
+	
+	// Check for encrypted blobs first
+	if bytes.Equal(magic, []byte{123, 103, 133, 190, 34, 45, 76, 240}) || 
+	   bytes.Equal(magic, []byte{230, 89, 27, 191, 11, 191, 216, 11}) {
+		// Encrypted blob - requires CryptConfig
+		if cryptConfig == nil {
+			return nil, fmt.Errorf("encrypted blob requires encryption key")
+		}
+		return cryptConfig.DecryptChunk(dataBlobBytes)
+	}
+	
+	// Handle unencrypted blobs
+	if bytes.Equal(magic, []byte{66, 171, 56, 7, 190, 131, 112, 161}) {
+		// UNCOMPRESSED_BLOB_MAGIC_1_0
+		crc32Bytes := dataBlobBytes[8:12]
+		data := dataBlobBytes[12:]
+		
+		// Verify CRC32
+		expectedCrc := binary.LittleEndian.Uint32(crc32Bytes)
+		actualCrc := crc32.ChecksumIEEE(data)
+		if expectedCrc != actualCrc {
+			return nil, fmt.Errorf("CRC32 mismatch: expected %08x, got %08x", expectedCrc, actualCrc)
+		}
+		
+		return data, nil
+	} else if bytes.Equal(magic, []byte{49, 185, 88, 66, 111, 182, 163, 127}) {
+		// COMPRESSED_BLOB_MAGIC_1_0
+		crc32Bytes := dataBlobBytes[8:12]
+		compressedData := dataBlobBytes[12:]
+		
+		// Verify CRC32
+		expectedCrc := binary.LittleEndian.Uint32(crc32Bytes)
+		actualCrc := crc32.ChecksumIEEE(compressedData)
+		if expectedCrc != actualCrc {
+			return nil, fmt.Errorf("CRC32 mismatch: expected %08x, got %08x", expectedCrc, actualCrc)
+		}
+		
+		// Decompress
+		decoder, err := zstd.NewReader(nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create zstd decoder: %v", err)
+		}
+		defer decoder.Close()
+		
+		decompressed, err := decoder.DecodeAll(compressedData, nil)
+		if err != nil {
+			return nil, fmt.Errorf("zstd decompression failed: %v", err)
+		}
+		
+		return decompressed, nil
+	}
+	
+	return nil, fmt.Errorf("unknown blob magic: %x", magic)
 }
 
 // ComputeDigest computes the chunk digest for encrypted chunks following PBS spec:

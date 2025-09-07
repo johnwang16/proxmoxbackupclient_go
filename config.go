@@ -43,12 +43,36 @@ type Config struct {
 	MasterKeyPath        string      `json:"master-key-path"`
 	ForceFullBackup      bool        `json:"force-full-backup"`
 	SMTP                 *SMTPConfig `json:"smtp"`
+	
+	// Restore options
+	RestoreMode          bool        `json:"restore"`
+	RestoreArchive       string      `json:"restore-archive"`
+	RestoreOutput        string      `json:"restore-output"`
+	RestoreSnapshot      string      `json:"restore-snapshot"`  // backup timestamp, e.g., "2024-01-01T12:00:00Z"
+	ListSnapshots        bool        `json:"list-snapshots"`
 }
 
 func (c *Config) valid() bool {
-	baseValid := c.BaseURL != "" && c.AuthID != "" && c.Secret != "" && c.Datastore != "" && ( c.BackupSourceDir != "" || c.BackupStreamName != "" )
+	// Base connection requirements for both backup and restore
+	baseValid := c.BaseURL != "" && c.AuthID != "" && c.Secret != "" && c.Datastore != ""
 	if !baseValid {
 		return baseValid
+	}
+	
+	// List snapshots mode - only requires connection info
+	if c.ListSnapshots {
+		return true
+	}
+	
+	// Restore mode validation
+	if c.RestoreMode {
+		return c.RestoreArchive != "" && c.RestoreOutput != "" && c.RestoreSnapshot != ""
+	}
+	
+	// Backup mode validation
+	backupValid := c.BackupSourceDir != "" || c.BackupStreamName != ""
+	if !backupValid {
+		return backupValid
 	}
 
 	if c.SMTP != nil {
@@ -92,6 +116,13 @@ func loadConfig() *Config {
 	encryptionPasswordFlag := flag.String("encryption-password", "", "Password for encrypted key file (optional)")
 	masterKeyPathFlag := flag.String("master-key-path", "", "Path to RSA master key for key recovery (optional)")
 	forceFullBackupFlag := flag.Bool("force-full-backup", false, "Force a full backup, ignoring previous backup for incremental deduplication (optional)")
+
+	// Restore flags
+	restoreModeFlag := flag.Bool("restore", false, "Enable restore mode")
+	restoreArchiveFlag := flag.String("restore-archive", "", "Archive name to restore (e.g., backup.pxar.didx)")
+	restoreOutputFlag := flag.String("restore-output", "", "Output path for restored data")
+	restoreSnapshotFlag := flag.String("restore-snapshot", "", "Backup snapshot timestamp (e.g., 2024-01-01T12:00:00Z) or 'latest' for most recent")
+	listSnapshotsFlag := flag.Bool("list-snapshots", false, "List available backup snapshots and exit")
 
 	configFile := flag.String("config", "", "Path to JSON config file. If this flag is provided all the others will override the loaded config file")
 
@@ -204,6 +235,19 @@ func loadConfig() *Config {
 	if *forceFullBackupFlag {
 		config.ForceFullBackup = *forceFullBackupFlag
 	}
+
+	// Set restore flags
+	config.RestoreMode = *restoreModeFlag
+	if *restoreArchiveFlag != "" {
+		config.RestoreArchive = *restoreArchiveFlag
+	}
+	if *restoreOutputFlag != "" {
+		config.RestoreOutput = *restoreOutputFlag
+	}
+	if *restoreSnapshotFlag != "" {
+		config.RestoreSnapshot = *restoreSnapshotFlag
+	}
+	config.ListSnapshots = *listSnapshotsFlag
 
 	return config
 }
