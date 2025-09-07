@@ -272,11 +272,9 @@ func (pbs *PBSClient) CloseDynamicIndex(writerid uint64, checksum string, totals
 		return err
 	}
 
-	fmt.Printf("DEBUG: CloseDynamicIndex response status: %d for writer %d\n", resp2.StatusCode, writerid)
 	
 	if resp2.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp2.Body)
-		fmt.Printf("DEBUG: CloseDynamicIndex error response: %s\n", string(body))
 		resp2.Body.Close()
 		return fmt.Errorf("close dynamic index failed with status %d", resp2.StatusCode)
 	}
