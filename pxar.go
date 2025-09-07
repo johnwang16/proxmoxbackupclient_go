@@ -39,6 +39,11 @@ const (
 
 var catalog_magic = []byte{145, 253, 96, 249, 196, 103, 88, 213}
 
+// PXAR magic bytes in little-endian format for header alignment scanning
+var pxar_entry_magic_le = []byte{0xef, 0xac, 0x88, 0xe5, 0x74, 0x64, 0x95, 0xd5}    // PXAR_ENTRY
+var pxar_filename_magic_le = []byte{0xb3, 0x17, 0x39, 0x06, 0x21, 0x11, 0x70, 0x16} // PXAR_FILENAME
+var pxar_payload_magic_le = []byte{0x25, 0x1a, 0x7c, 0x0b, 0x1b, 0x7a, 0x14, 0x28}  // PXAR_PAYLOAD
+
 // PXAR entry header structure
 type PXARHeader struct {
 	Type   uint64
@@ -665,9 +670,9 @@ func extractPXARRecursive(reader io.ReadSeeker, baseDir string, currentPath stri
 			if scanErr == nil && bytesRead >= 16 {
 				// Magic bytes for different PXAR entry types (little-endian)
 				magicBytes := [][]byte{
-					{0xef, 0xac, 0x88, 0xe5, 0x74, 0x64, 0x95, 0xd5}, // PXAR_ENTRY
-					{0xb3, 0x17, 0x39, 0x06, 0x21, 0x11, 0x70, 0x16}, // PXAR_FILENAME
-					{0x25, 0x1a, 0x7c, 0x0b, 0x1b, 0x7a, 0x14, 0x28}, // PXAR_PAYLOAD
+					pxar_entry_magic_le,    // PXAR_ENTRY
+					pxar_filename_magic_le, // PXAR_FILENAME
+					pxar_payload_magic_le,  // PXAR_PAYLOAD
 				}
 				
 				for _, magic := range magicBytes {

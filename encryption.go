@@ -176,10 +176,10 @@ func (cc *CryptConfig) DecryptChunk(dataBlobBytes []byte) ([]byte, error) {
 	
 	// Check magic bytes to determine blob type
 	var isCompressed bool
-	if bytes.Equal(magic, []byte{123, 103, 133, 190, 34, 45, 76, 240}) {
+	if bytes.Equal(magic, blobEncryptedMagic) {
 		// ENCRYPTED_BLOB_MAGIC_1_0
 		isCompressed = false
-	} else if bytes.Equal(magic, []byte{230, 89, 27, 191, 11, 191, 216, 11}) {
+	} else if bytes.Equal(magic, blobEncryptedCompressedMagic) {
 		// ENCR_COMPR_BLOB_MAGIC_1_0 
 		isCompressed = true
 	} else {
@@ -229,8 +229,8 @@ func DecodeDataBlob(dataBlobBytes []byte, cryptConfig *CryptConfig) ([]byte, err
 	magic := dataBlobBytes[0:8]
 	
 	// Check for encrypted blobs first
-	if bytes.Equal(magic, []byte{123, 103, 133, 190, 34, 45, 76, 240}) || 
-	   bytes.Equal(magic, []byte{230, 89, 27, 191, 11, 191, 216, 11}) {
+	if bytes.Equal(magic, blobEncryptedMagic) || 
+	   bytes.Equal(magic, blobEncryptedCompressedMagic) {
 		// Encrypted blob - requires CryptConfig
 		if cryptConfig == nil {
 			return nil, fmt.Errorf("encrypted blob requires encryption key")
@@ -239,7 +239,7 @@ func DecodeDataBlob(dataBlobBytes []byte, cryptConfig *CryptConfig) ([]byte, err
 	}
 	
 	// Handle unencrypted blobs
-	if bytes.Equal(magic, []byte{66, 171, 56, 7, 190, 131, 112, 161}) {
+	if bytes.Equal(magic, blobUncompressedMagic) {
 		// UNCOMPRESSED_BLOB_MAGIC_1_0
 		crc32Bytes := dataBlobBytes[8:12]
 		data := dataBlobBytes[12:]
@@ -252,7 +252,7 @@ func DecodeDataBlob(dataBlobBytes []byte, cryptConfig *CryptConfig) ([]byte, err
 		}
 		
 		return data, nil
-	} else if bytes.Equal(magic, []byte{49, 185, 88, 66, 111, 182, 163, 127}) {
+	} else if bytes.Equal(magic, blobCompressedMagic) {
 		// COMPRESSED_BLOB_MAGIC_1_0
 		crc32Bytes := dataBlobBytes[8:12]
 		compressedData := dataBlobBytes[12:]
@@ -312,14 +312,14 @@ func (cc *CryptConfig) EncodeDataBlob(plaintext []byte, compress bool) ([]byte, 
 		if len(compressed) < len(plaintext) {
 			dataToEncrypt = compressed
 			// PBS compressed encrypted magic: SHA256("Proxmox Backup zstd compressed encrypted blob v1.0")[0..8]
-			magic = []byte{230, 89, 27, 191, 11, 191, 216, 11} // ENCR_COMPR_BLOB_MAGIC_1_0
+			magic = blobEncryptedCompressedMagic // ENCR_COMPR_BLOB_MAGIC_1_0
 		} else {
 			dataToEncrypt = plaintext
-			magic = []byte{123, 103, 133, 190, 34, 45, 76, 240} // ENCRYPTED_BLOB_MAGIC_1_0
+			magic = blobEncryptedMagic // ENCRYPTED_BLOB_MAGIC_1_0
 		}
 	} else {
 		dataToEncrypt = plaintext
-		magic = []byte{123, 103, 133, 190, 34, 45, 76, 240} // ENCRYPTED_BLOB_MAGIC_1_0
+		magic = blobEncryptedMagic // ENCRYPTED_BLOB_MAGIC_1_0
 	}
 	
 	// Store the ORIGINAL data for digest calculation (PBS always uses original data for digest)
