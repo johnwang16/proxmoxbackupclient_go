@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math/bits"
 	"os"
 	"sort"
@@ -515,21 +516,26 @@ func ExtractPXAR(pxarFile string, outputDir string) error {
 	}
 	defer file.Close()
 	
+	return ExtractPXARFromReader(file, outputDir)
+}
+
+// ExtractPXARFromReader extracts a PXAR archive from an io.ReadSeeker to the specified directory
+func ExtractPXARFromReader(reader io.ReadSeeker, outputDir string) error {
 	// Create output directory if it doesn't exist
-	err = os.MkdirAll(outputDir, 0755)
+	err := os.MkdirAll(outputDir, 0755)
 	if err != nil {
 		return fmt.Errorf("failed to create output directory: %v", err)
 	}
 	
-	return extractPXARRecursive(file, outputDir, "")
+	return extractPXARRecursive(reader, outputDir, "")
 }
 
 // extractPXARRecursive recursively extracts PXAR entries
-func extractPXARRecursive(file *os.File, baseDir string, currentPath string) error {
+func extractPXARRecursive(reader io.ReadSeeker, baseDir string, currentPath string) error {
 	for {
 		// Read PXAR header
 		var header PXARHeader
-		err := binary.Read(file, binary.LittleEndian, &header)
+		err := binary.Read(reader, binary.LittleEndian, &header)
 		if err != nil {
 			if err.Error() == "EOF" {
 				return nil // End of file
@@ -542,7 +548,7 @@ func extractPXARRecursive(file *os.File, baseDir string, currentPath string) err
 		case PXAR_ENTRY, PXAR_ENTRY_V1:
 			// Read entry metadata
 			var entry PXAREntry
-			err = binary.Read(file, binary.LittleEndian, &entry)
+			err = binary.Read(reader, binary.LittleEndian, &entry)
 			if err != nil {
 				return fmt.Errorf("failed to read PXAR entry: %v", err)
 			}
@@ -574,7 +580,7 @@ func extractPXARRecursive(file *os.File, baseDir string, currentPath string) err
 			// Read filename
 			nameLength := header.Length - 16 // Subtract header size
 			nameBytes := make([]byte, nameLength)
-			_, err = file.Read(nameBytes)
+			_, err = reader.Read(nameBytes)
 			if err != nil {
 				return fmt.Errorf("failed to read filename: %v", err)
 			}
@@ -602,7 +608,7 @@ func extractPXARRecursive(file *os.File, baseDir string, currentPath string) err
 				}
 				
 				// Copy payload data to file
-				_, err = copyN(outFile, file, int64(payloadLength))
+				_, err = copyN(outFile, reader, int64(payloadLength))
 				outFile.Close()
 				if err != nil {
 					return fmt.Errorf("failed to write file content: %v", err)
@@ -611,7 +617,7 @@ func extractPXARRecursive(file *os.File, baseDir string, currentPath string) err
 				fmt.Printf("Extracted file: %s (%d bytes)\n", currentPath, payloadLength)
 			} else {
 				// Skip payload if no filename
-				_, err = file.Seek(int64(payloadLength), 1)
+				_, err = reader.Seek(int64(payloadLength), 1)
 				if err != nil {
 					return fmt.Errorf("failed to skip payload: %v", err)
 				}
@@ -621,7 +627,7 @@ func extractPXARRecursive(file *os.File, baseDir string, currentPath string) err
 			// Symbolic link target
 			linkLength := header.Length - 16
 			linkBytes := make([]byte, linkLength)
-			_, err = file.Read(linkBytes)
+			_, err = reader.Read(linkBytes)
 			if err != nil {
 				return fmt.Errorf("failed to read symlink target: %v", err)
 			}
@@ -646,7 +652,7 @@ func extractPXARRecursive(file *os.File, baseDir string, currentPath string) err
 			// Skip unknown entry types
 			skipLength := header.Length - 16
 			if skipLength > 0 {
-				_, err = file.Seek(int64(skipLength), 1)
+				_, err = reader.Seek(int64(skipLength), 1)
 				if err != nil {
 					return fmt.Errorf("failed to skip unknown entry type %x: %v", header.Type, err)
 				}
@@ -654,14 +660,14 @@ func extractPXARRecursive(file *os.File, baseDir string, currentPath string) err
 		}
 		
 		// PXAR alignment - find the next valid header
-		pos, _ := file.Seek(0, 1)
+		pos, _ := reader.Seek(0, 1)
 		
 		foundValidHeader := false
 		if pos % 8 != 0 {
 			// Scan for the next valid PXAR header magic bytes
-			file.Seek(pos, 0)
+			reader.Seek(pos, 0)
 			scanBuffer := make([]byte, 32)
-			bytesRead, scanErr := file.Read(scanBuffer)
+			bytesRead, scanErr := reader.Read(scanBuffer)
 			if scanErr == nil && bytesRead >= 16 {
 				// Magic bytes for different PXAR entry types (little-endian)
 				magicBytes := [][]byte{
@@ -673,7 +679,7 @@ func extractPXARRecursive(file *os.File, baseDir string, currentPath string) err
 				for _, magic := range magicBytes {
 					for i := 0; i <= bytesRead-8; i++ {
 						if bytes.Equal(scanBuffer[i:i+8], magic) {
-							file.Seek(pos+int64(i), 0)
+							reader.Seek(pos+int64(i), 0)
 							foundValidHeader = true
 							break
 						}
@@ -687,14 +693,14 @@ func extractPXARRecursive(file *os.File, baseDir string, currentPath string) err
 			if !foundValidHeader {
 				// Use standard 8-byte alignment as fallback
 				alignBytes := 8 - (pos % 8)
-				file.Seek(pos+int64(alignBytes), 0)
+				reader.Seek(pos+int64(alignBytes), 0)
 			}
 		}
 	}
 }
 
 // Helper function to copy N bytes (like io.CopyN but with better error handling)
-func copyN(dst *os.File, src *os.File, n int64) (int64, error) {
+func copyN(dst *os.File, src io.Reader, n int64) (int64, error) {
 	buf := make([]byte, 32*1024) // 32KB buffer
 	var written int64
 	
