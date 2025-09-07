@@ -14,6 +14,13 @@ import (
 	"github.com/dchest/siphash"
 )
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 const (
 	PXAR_ENTRY               uint64 = 0xd5956474e588acef
 	PXAR_ENTRY_V1            uint64 = 0x11da850a1c1cceff
@@ -36,6 +43,23 @@ const (
 )
 
 var catalog_magic = []byte{145, 253, 96, 249, 196, 103, 88, 213}
+
+// PXAR entry header structure
+type PXARHeader struct {
+	Type   uint64
+	Length uint64
+}
+
+// PXAR entry structure  
+type PXAREntry struct {
+	Mode     uint64
+	Flags    uint64
+	UID      uint32
+	GID      uint32
+	MTime    uint64
+	MTimeNs  uint32
+	_        uint32 // padding
+}
 
 const (
 	IFMT   uint64 = 0o0170000
@@ -480,4 +504,226 @@ func (a *PXARArchive) WriteFile(path string, basename string) CatalogFile {
 		MTime: uint64(fileInfo.ModTime().Unix()),
 		Size:  uint64(fileInfo.Size()),
 	}
+}
+
+// ExtractPXAR extracts a PXAR archive to the specified directory
+func ExtractPXAR(pxarFile string, outputDir string) error {
+	// Open PXAR file
+	file, err := os.Open(pxarFile)
+	if err != nil {
+		return fmt.Errorf("failed to open PXAR file: %v", err)
+	}
+	defer file.Close()
+	
+	// Create output directory if it doesn't exist
+	err = os.MkdirAll(outputDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create output directory: %v", err)
+	}
+	
+	return extractPXARRecursive(file, outputDir, "")
+}
+
+// extractPXARRecursive recursively extracts PXAR entries
+func extractPXARRecursive(file *os.File, baseDir string, currentPath string) error {
+	for {
+		// Read PXAR header
+		var header PXARHeader
+		err := binary.Read(file, binary.LittleEndian, &header)
+		if err != nil {
+			if err.Error() == "EOF" {
+				return nil // End of file
+			}
+			return fmt.Errorf("failed to read PXAR header: %v", err)
+		}
+		
+		// Handle different PXAR entry types
+		switch header.Type {
+		case PXAR_ENTRY, PXAR_ENTRY_V1:
+			// Read entry metadata
+			var entry PXAREntry
+			err = binary.Read(file, binary.LittleEndian, &entry)
+			if err != nil {
+				return fmt.Errorf("failed to read PXAR entry: %v", err)
+			}
+			
+			// Process the entry based on file type
+			fileType := entry.Mode & IFMT
+			switch fileType {
+			case IFDIR:
+				// Directory entry - create directory if not root
+				if currentPath != "" {
+					dirPath := filepath.Join(baseDir, currentPath)
+					err = os.MkdirAll(dirPath, os.FileMode(entry.Mode&0777))
+					if err != nil {
+						return fmt.Errorf("failed to create directory %s: %v", dirPath, err)
+					}
+				}
+				
+			case IFREG:
+				// Regular file - will be handled when PXAR_PAYLOAD is encountered
+				
+			case IFLNK:
+				// Symbolic link - will be handled when PXAR_SYMLINK is encountered
+				
+			default:
+				// Skip unsupported file types
+			}
+			
+		case PXAR_FILENAME:
+			// Read filename
+			nameLength := header.Length - 16 // Subtract header size
+			nameBytes := make([]byte, nameLength)
+			_, err = file.Read(nameBytes)
+			if err != nil {
+				return fmt.Errorf("failed to read filename: %v", err)
+			}
+			
+			// Remove null terminator and update current path
+			filename := string(bytes.TrimRight(nameBytes, "\x00"))
+			currentPath = filename
+			
+		case PXAR_PAYLOAD:
+			// File content
+			payloadLength := header.Length - 16 // Subtract header size
+			if currentPath != "" {
+				filePath := filepath.Join(baseDir, currentPath)
+				
+				// Create parent directory if needed
+				err = os.MkdirAll(filepath.Dir(filePath), 0755)
+				if err != nil {
+					return fmt.Errorf("failed to create parent directory for %s: %v", filePath, err)
+				}
+				
+				// Create and write file
+				outFile, err := os.Create(filePath)
+				if err != nil {
+					return fmt.Errorf("failed to create file %s: %v", filePath, err)
+				}
+				
+				// Copy payload data to file
+				_, err = copyN(outFile, file, int64(payloadLength))
+				outFile.Close()
+				if err != nil {
+					return fmt.Errorf("failed to write file content: %v", err)
+				}
+				
+				fmt.Printf("Extracted file: %s (%d bytes)\n", currentPath, payloadLength)
+			} else {
+				// Skip payload if no filename
+				_, err = file.Seek(int64(payloadLength), 1)
+				if err != nil {
+					return fmt.Errorf("failed to skip payload: %v", err)
+				}
+			}
+			
+		case PXAR_SYMLINK:
+			// Symbolic link target
+			linkLength := header.Length - 16
+			linkBytes := make([]byte, linkLength)
+			_, err = file.Read(linkBytes)
+			if err != nil {
+				return fmt.Errorf("failed to read symlink target: %v", err)
+			}
+			
+			if currentPath != "" {
+				linkPath := filepath.Join(baseDir, currentPath)
+				linkTarget := string(bytes.TrimRight(linkBytes, "\x00"))
+				
+				err = os.Symlink(linkTarget, linkPath)
+				if err != nil {
+					fmt.Printf("Warning: failed to create symlink %s -> %s: %v\n", linkPath, linkTarget, err)
+				} else {
+					fmt.Printf("Extracted symlink: %s -> %s\n", currentPath, linkTarget)
+				}
+			}
+			
+		case PXAR_GOODBYE:
+			// End of directory entries
+			return nil
+			
+		default:
+			// Skip unknown entry types
+			skipLength := header.Length - 16
+			if skipLength > 0 {
+				_, err = file.Seek(int64(skipLength), 1)
+				if err != nil {
+					return fmt.Errorf("failed to skip unknown entry type %x: %v", header.Type, err)
+				}
+			}
+		}
+		
+		// PXAR alignment - find the next valid header
+		pos, _ := file.Seek(0, 1)
+		
+		foundValidHeader := false
+		if pos % 8 != 0 {
+			// Scan for the next valid PXAR header magic bytes
+			file.Seek(pos, 0)
+			scanBuffer := make([]byte, 32)
+			bytesRead, scanErr := file.Read(scanBuffer)
+			if scanErr == nil && bytesRead >= 16 {
+				// Magic bytes for different PXAR entry types (little-endian)
+				magicBytes := [][]byte{
+					{0xef, 0xac, 0x88, 0xe5, 0x74, 0x64, 0x95, 0xd5}, // PXAR_ENTRY
+					{0xb3, 0x17, 0x39, 0x06, 0x21, 0x11, 0x70, 0x16}, // PXAR_FILENAME
+					{0x25, 0x1a, 0x7c, 0x0b, 0x1b, 0x7a, 0x14, 0x28}, // PXAR_PAYLOAD
+				}
+				
+				for _, magic := range magicBytes {
+					for i := 0; i <= bytesRead-8; i++ {
+						if bytes.Equal(scanBuffer[i:i+8], magic) {
+							file.Seek(pos+int64(i), 0)
+							foundValidHeader = true
+							break
+						}
+					}
+					if foundValidHeader {
+						break
+					}
+				}
+			}
+			
+			if !foundValidHeader {
+				// Use standard 8-byte alignment as fallback
+				alignBytes := 8 - (pos % 8)
+				file.Seek(pos+int64(alignBytes), 0)
+			}
+		}
+	}
+}
+
+// Helper function to copy N bytes (like io.CopyN but with better error handling)
+func copyN(dst *os.File, src *os.File, n int64) (int64, error) {
+	buf := make([]byte, 32*1024) // 32KB buffer
+	var written int64
+	
+	for written < n {
+		remaining := n - written
+		toRead := int64(len(buf))
+		if remaining < toRead {
+			toRead = remaining
+		}
+		
+		nr, err := src.Read(buf[:toRead])
+		if nr > 0 {
+			nw, ew := dst.Write(buf[:nr])
+			if nw > 0 {
+				written += int64(nw)
+			}
+			if ew != nil {
+				return written, ew
+			}
+			if nr != nw {
+				return written, fmt.Errorf("short write")
+			}
+		}
+		if err != nil {
+			if err.Error() == "EOF" && written == n {
+				break
+			}
+			return written, err
+		}
+	}
+	return written, nil
 }

@@ -10,7 +10,6 @@ import (
 	"hash"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -774,39 +773,31 @@ func restorePXAR(client *PBSClient, outputDir string, cryptConfig *CryptConfig, 
 		return fmt.Errorf("failed to create output directory: %v", err)
 	}
 	
-	// Save PXAR file in the restore directory
-	pxarFile := filepath.Join(outputDir, "backup.pxar")
+	// Save PXAR file to temporary location first
+	tempPxarFile := filepath.Join(os.TempDir(), "restore-backup.pxar")
+	defer func() {
+		// Clean up temp file unless we're keeping it for manual extraction
+		if _, err := os.Stat(tempPxarFile); err == nil {
+			os.Remove(tempPxarFile)
+		}
+	}()
 	
-	// First restore the PXAR archive to the output directory
-	err = restoreBackup(client, archiveName, pxarFile, cryptConfig, snapshotTime)
+	// First restore the PXAR archive to temporary location
+	err = restoreBackup(client, archiveName, tempPxarFile, cryptConfig, snapshotTime)
 	if err != nil {
 		return fmt.Errorf("failed to restore PXAR archive: %v", err)
 	}
 	
 	// Extract PXAR archive to output directory
-	fmt.Printf("PXAR archive saved to: %s\n", pxarFile)
-	fmt.Printf("Attempting to extract PXAR archive to %s\n", outputDir)
+	fmt.Printf("Extracting PXAR archive to: %s\n", outputDir)
 	
-	// Try to use the pxar command-line tool for extraction
-	cmd := exec.Command("pxar", "extract", pxarFile, outputDir)
-	output, err := cmd.CombinedOutput()
+	// Use native PXAR extraction
+	err = ExtractPXAR(tempPxarFile, outputDir)
 	if err != nil {
-		// If pxar tool is not available, provide fallback instructions
-		fmt.Printf("PXAR extraction tool not found or failed: %v\n", err)
-		if len(output) > 0 {
-			fmt.Printf("Output: %s\n", string(output))
-		}
-		fmt.Printf("The PXAR archive has been saved to: %s\n", pxarFile)
-		fmt.Printf("You can manually extract using the official PBS client tools:\n")
-		fmt.Printf("  pxar extract \"%s\" \"%s\"\n", pxarFile, outputDir)
-		fmt.Printf("Or install the proxmox-backup-client package for the pxar tool\n")
-		
-		// Don't return an error since the PXAR file was successfully saved
-		fmt.Printf("Restore completed - PXAR archive available for manual extraction\n")
-		return nil
+		return fmt.Errorf("PXAR extraction failed: %v", err)
 	}
 	
-	fmt.Printf("PXAR extraction completed successfully\n")
 	fmt.Printf("Files extracted to: %s\n", outputDir)
+	fmt.Printf("Restore completed successfully\n")
 	return nil
 }
