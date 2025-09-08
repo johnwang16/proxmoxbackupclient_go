@@ -203,7 +203,24 @@ This will show available snapshots with timestamps, files, and encryption status
    - If `-restore-snapshot` is "latest" or omitted, selects the most recent snapshot
    - If a timestamp is provided, finds the exact matching snapshot
 3. **Data Retrieval**: Downloads and decrypts/decompresses chunks as needed
-4. **PXAR Extraction**: For PXAR archives, extracts all files and directories with proper permissions
+4. **Data Integrity Verification**: Each chunk is validated against its expected digest to ensure data integrity
+5. **PXAR Extraction**: For PXAR archives, extracts all files and directories with proper permissions
+
+### Data Integrity Verification
+
+The client implements comprehensive data integrity checks during restore operations:
+
+- **Chunk Digest Validation**: Every restored chunk is verified against its expected digest from the backup index
+- **Encryption-Aware**: Uses appropriate digest calculation method based on chunk encryption status
+  - Encrypted chunks: SHA256(plaintext + id_key) following PBS specification
+  - Unencrypted chunks: SHA256(plaintext) standard checksum
+- **Error Detection**: Corrupted chunks, transmission errors, or storage issues are detected and reported
+- **PBS Compatibility**: Uses identical digest validation logic as the official proxmox-backup-client
+
+If a chunk fails digest verification, the restore operation will stop with an error message like:
+```
+failed to decode chunk abc123...: detected chunk with wrong digest
+```
 
 ### Restore Examples
 

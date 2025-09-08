@@ -1,0 +1,45 @@
+{
+    "comment": "This example shows a combined config file that can be used for both backup and restore operations",
+    
+    "comment": "Connection settings (required for both backup and restore)",
+    "baseurl": "https://your.pbs.installation.net:8007",
+    "certfingerprint": "XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX",
+    "authid": "user@realm!token-id",
+    "secret": "secret-uuid",
+    "datastore": "myDatastore",
+    "namespace": "",
+    "backup-id": "myhost",
+    
+    "comment": "Backup settings (used when -restore flag is NOT present)",
+    "backupdir": "C:\\data",
+    "backupstreamname": "",
+    "pxarout": "",
+    "force-full-backup": false,
+    
+    "comment": "Restore settings (used when -restore flag IS present)",
+    "restore-archive": "backup.pxar.didx",
+    "restore-output": "C:\\restored",
+    "restore-snapshot": "latest",
+    
+    "comment": "Encryption settings (optional, used for both backup and restore)",
+    "encryption-key-path": "",
+    "encryption-password": "",
+    "master-key-path": "",
+    
+    "comment": "Email notification settings (optional, mainly for backup)",
+    "smtp": {
+        "host": "smtp.example.com",
+        "port": "465",
+        "username": "my-user@example.com",
+        "password": "my-password",
+        "insecure": false,
+        "template": {
+            "subject": "{{if not .Success}}[FAILED]{{else}}[SUCCESS]{{end}} Backup report for {{.Datastore}}",
+            "body": "Backup {{if .Success}}completed{{else}}ended with errors{{end}} on host {{.Hostname}} (took {{.FromattedDuration}})\n{{if .Success}}Chunks New {{.NewChunks}}, Reused {{.ReusedChunks}}.{{else}}Error occurred while working, backup may be not completed.\nLast error is: {{.ErrorStr}}{{end}}"
+        },
+        "mails": [{
+            "from": "sender@example.com",
+            "to": "receiver@example.com"
+        }]
+    }
+}
