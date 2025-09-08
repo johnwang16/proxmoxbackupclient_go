@@ -99,9 +99,46 @@ var blobUncompressedMagic = []byte{66, 171, 56, 7, 190, 131, 112, 161}
 var blobEncryptedMagic = []byte{123, 103, 133, 190, 34, 45, 76, 240}
 var blobEncryptedCompressedMagic = []byte{230, 89, 27, 191, 11, 191, 216, 11}
 
-func (pbs *PBSClient) CreateDynamicIndex(name string) (uint64, error) {
+// sanitizeFilename ensures filename complies with PBS regex requirements for stream backups
+func sanitizeFilename(name string) string {
+	// For standard backups (backup.pxar.didx, catalog.pcat1.didx), return as-is
+	if name == "backup.pxar.didx" || name == "catalog.pcat1.didx" {
+		return name
+	}
+	
+	// Only sanitize user-provided stream backup names
+	// Remove any path separators and ensure only valid characters
+	var result []rune
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || 
+		   (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			result = append(result, r)
+		} else {
+			result = append(result, '_') // Replace invalid chars with underscore
+		}
+	}
+	sanitized := string(result)
+	
+	// Ensure it has a valid extension for dynamic indices
+	if !strings.HasSuffix(sanitized, ".didx") && !strings.HasSuffix(sanitized, ".fidx") {
+		if strings.Contains(sanitized, ".") {
+			// Replace extension with .didx
+			lastDot := strings.LastIndex(sanitized, ".")
+			sanitized = sanitized[:lastDot] + ".didx"
+		} else {
+			// Add .didx extension
+			sanitized += ".didx"
+		}
+	}
+	
+	return sanitized
+}
 
-	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_index", bytes.NewBuffer([]byte(fmt.Sprintf("{\"archive-name\": \"%s\"}", name))))
+func (pbs *PBSClient) CreateDynamicIndex(name string) (uint64, error) {
+	// Sanitize filename to ensure PBS compliance
+	sanitizedName := sanitizeFilename(name)
+
+	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_index", bytes.NewBuffer([]byte(fmt.Sprintf("{\"archive-name\": \"%s\"}", sanitizedName))))
 	if err != nil {
 		return 0, err
 	}
@@ -137,7 +174,7 @@ func (pbs *PBSClient) CreateDynamicIndex(name string) (uint64, error) {
 	f := File{
 		CryptMode: cryptMode,
 		Csum:      "",
-		Filename:  name,
+		Filename:  sanitizedName,
 		Size:      0,
 	}
 	pbs.manifest.Files = append(pbs.manifest.Files, f)

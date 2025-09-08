@@ -103,9 +103,10 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 	defer outFile.Close()
 	
 	// Download and reconstruct chunks
+	var totalBytes int64
 	for i, chunk := range chunks {
 		digestHex := hex.EncodeToString(chunk.digest)
-		fmt.Printf("Restoring chunk %d/%d: %s\n", i+1, len(chunks), digestHex)
+		fmt.Printf("Restoring chunk %d/%d: %s (offset: %d)\n", i+1, len(chunks), digestHex, chunk.offset)
 		
 		// Download chunk data (DataBlob format) using backup protocol
 		chunkDataBlob, err := client.DownloadChunk(digestHex)
@@ -119,10 +120,22 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 			return fmt.Errorf("failed to decode chunk %s: %v", digestHex, err)
 		}
 		
+		fmt.Printf("Writing %d bytes to file (total so far: %d)\n", len(plaintext), totalBytes+int64(len(plaintext)))
+		
 		// Write to output file
-		_, err = outFile.Write(plaintext)
+		n, err := outFile.Write(plaintext)
 		if err != nil {
 			return fmt.Errorf("failed to write chunk data: %v", err)
+		}
+		if n != len(plaintext) {
+			return fmt.Errorf("incomplete write: wrote %d bytes, expected %d", n, len(plaintext))
+		}
+		totalBytes += int64(n)
+		
+		// Flush after each chunk for large files
+		err = outFile.Sync()
+		if err != nil {
+			return fmt.Errorf("failed to sync chunk data: %v", err)
 		}
 	}
 	
@@ -167,6 +180,8 @@ type RestoreReader struct {
 	currentPos  int64
 	data        []byte // Buffer for current chunk data
 	dataOffset  int64  // Offset of buffered data in the stream
+	totalSize   int64  // Cached total size (-1 if not calculated yet)
+	totalChunks int    // Total number of chunks for progress reporting
 }
 
 func (r *RestoreReader) Read(p []byte) (n int, err error) {
@@ -182,8 +197,20 @@ func (r *RestoreReader) Read(p []byte) (n int, err error) {
 	
 	// Calculate how much we can read from current buffer
 	bufferPos := r.currentPos - r.dataOffset
+	if bufferPos < 0 {
+		return 0, fmt.Errorf("invalid buffer position: currentPos=%d, dataOffset=%d, bufferPos=%d", r.currentPos, r.dataOffset, bufferPos)
+	}
 	availableInBuffer := int64(len(r.data)) - bufferPos
+	if availableInBuffer <= 0 {
+		// We've consumed all data in this chunk, need to load next one
+		r.currentPos = r.dataOffset + int64(len(r.data))
+		return r.Read(p) // Recursive call to load next chunk
+	}
+	
 	toRead := min(int64(len(p)), availableInBuffer)
+	if toRead == 0 {
+		return 0, nil
+	}
 	
 	// Copy data to output buffer
 	copy(p, r.data[bufferPos:bufferPos+toRead])
@@ -226,15 +253,26 @@ func (r *RestoreReader) getTotalSize() int64 {
 	if len(r.chunks) == 0 {
 		return 0
 	}
-	// Last chunk's offset gives us the total size
-	return int64(r.chunks[len(r.chunks)-1].offset)
+	
+	// Return cached value if already calculated
+	if r.totalSize >= 0 {
+		return r.totalSize
+	}
+	
+	// In DIDX, the offset of each chunk is the END position of that chunk
+	// So the total size is simply the last chunk's offset
+	lastChunkIndex := len(r.chunks) - 1
+	r.totalSize = int64(r.chunks[lastChunkIndex].offset)
+	return r.totalSize
 }
 
 func (r *RestoreReader) loadDataForPosition(pos int64) error {
 	// Find which chunk contains this position
+	// In DIDX: chunk[i] contains bytes from (chunk[i-1].offset) to (chunk[i].offset - 1)
 	chunkIndex := -1
 	for i := range r.chunks {
-		if i == len(r.chunks)-1 || pos < int64(r.chunks[i+1].offset) {
+		chunkEnd := int64(r.chunks[i].offset)
+		if pos < chunkEnd {
 			chunkIndex = i
 			break
 		}
@@ -264,11 +302,14 @@ func (r *RestoreReader) loadDataForPosition(pos int64) error {
 	
 	// Store the chunk data and its offset
 	r.data = plaintext
+	// In DIDX, chunk offset is the END position of the chunk
+	// So the START position is the previous chunk's offset (or 0 for first chunk)
 	if chunkIndex == 0 {
 		r.dataOffset = 0
 	} else {
 		r.dataOffset = int64(r.chunks[chunkIndex-1].offset)
 	}
+	fmt.Printf("Restoring chunk %d/%d: %s\n", chunkIndex+1, r.totalChunks, digestHex)
 	
 	return nil
 }
@@ -361,5 +402,7 @@ func createRestoreReader(client *PBSClient, archiveName string, cryptConfig *Cry
 		cryptConfig: cryptConfig,
 		chunks:      chunks,
 		currentPos:  0,
+		totalSize:   -1, // Initialize as uncalculated
+		totalChunks: len(chunks),
 	}, nil
 }
