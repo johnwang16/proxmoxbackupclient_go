@@ -114,7 +114,7 @@ func (c *ChunkState) HandleData(b []byte, client *PBSClient){
 					return
 				}
 				
-				// Now calculate digest on the exact data that was encrypted (stored in lastDigestData)
+				// Calculate digest on the exact data that was encrypted (stored in lastDigestData)
 				bindigest, shahash = c.computeChunkDigest(c.cryptConfig.lastDigestData)
 			} else {
 				// Unencrypted chunks - digest on original data
@@ -175,7 +175,7 @@ func (c *ChunkState) Eof(client *PBSClient) {
 				return
 			}
 			
-			// Now calculate digest on the exact data that was encrypted (stored in lastDigestData)
+			// Calculate digest on the exact data that was encrypted (stored in lastDigestData)
 			bindigest, shahash = c.computeChunkDigest(c.cryptConfig.lastDigestData)
 		} else {
 			// Unencrypted chunks - digest on original data

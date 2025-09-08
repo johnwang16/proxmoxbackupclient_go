@@ -221,12 +221,20 @@ func (cc *CryptConfig) DecryptChunk(dataBlobBytes []byte) ([]byte, error) {
 
 // DecodeDataBlob decodes both encrypted and unencrypted PBS DataBlob formats
 func DecodeDataBlob(dataBlobBytes []byte, cryptConfig *CryptConfig) ([]byte, error) {
+	return DecodeDataBlobWithDigest(dataBlobBytes, cryptConfig, nil)
+}
+
+// DecodeDataBlobWithDigest decodes and optionally validates chunk digest
+func DecodeDataBlobWithDigest(dataBlobBytes []byte, cryptConfig *CryptConfig, expectedDigest []byte) ([]byte, error) {
 	if len(dataBlobBytes) < 12 {
 		return nil, fmt.Errorf("DataBlob too short: %d bytes (minimum 12)", len(dataBlobBytes))
 	}
 	
 	// Parse magic to determine blob type
 	magic := dataBlobBytes[0:8]
+	
+	var plaintext []byte
+	var err error
 	
 	// Check for encrypted blobs first
 	if bytes.Equal(magic, blobEncryptedMagic) || 
@@ -235,11 +243,11 @@ func DecodeDataBlob(dataBlobBytes []byte, cryptConfig *CryptConfig) ([]byte, err
 		if cryptConfig == nil {
 			return nil, fmt.Errorf("encrypted blob requires encryption key")
 		}
-		return cryptConfig.DecryptChunk(dataBlobBytes)
-	}
-	
-	// Handle unencrypted blobs
-	if bytes.Equal(magic, blobUncompressedMagic) {
+		plaintext, err = cryptConfig.DecryptChunk(dataBlobBytes)
+		if err != nil {
+			return nil, err
+		}
+	} else if bytes.Equal(magic, blobUncompressedMagic) {
 		// UNCOMPRESSED_BLOB_MAGIC_1_0
 		crc32Bytes := dataBlobBytes[8:12]
 		data := dataBlobBytes[12:]
@@ -251,7 +259,7 @@ func DecodeDataBlob(dataBlobBytes []byte, cryptConfig *CryptConfig) ([]byte, err
 			return nil, fmt.Errorf("CRC32 mismatch: expected %08x, got %08x", expectedCrc, actualCrc)
 		}
 		
-		return data, nil
+		plaintext = data
 	} else if bytes.Equal(magic, blobCompressedMagic) {
 		// COMPRESSED_BLOB_MAGIC_1_0
 		crc32Bytes := dataBlobBytes[8:12]
@@ -271,23 +279,38 @@ func DecodeDataBlob(dataBlobBytes []byte, cryptConfig *CryptConfig) ([]byte, err
 		}
 		defer decoder.Close()
 		
-		decompressed, err := decoder.DecodeAll(compressedData, nil)
+		plaintext, err = decoder.DecodeAll(compressedData, nil)
 		if err != nil {
 			return nil, fmt.Errorf("zstd decompression failed: %v", err)
 		}
-		
-		return decompressed, nil
+	} else {
+		return nil, fmt.Errorf("unknown blob magic: %x", magic)
 	}
 	
-	return nil, fmt.Errorf("unknown blob magic: %x", magic)
+	// Validate digest if provided
+	if expectedDigest != nil {
+		var actualDigest [32]byte
+		if cryptConfig != nil {
+			// Encrypted chunks use crypt config for digest calculation
+			actualDigest = cryptConfig.ComputeDigest(plaintext)
+		} else {
+			// Unencrypted chunks use plain SHA256
+			actualDigest = sha256.Sum256(plaintext)
+		}
+		
+		if !bytes.Equal(expectedDigest, actualDigest[:]) {
+			return nil, fmt.Errorf("detected chunk with wrong digest")
+		}
+	}
+	
+	return plaintext, nil
 }
 
 // ComputeDigest computes the chunk digest for encrypted chunks following PBS spec:
-// Fixed: PBS uses encKey (not idKey) for encrypted chunk digest calculation
 func (cc *CryptConfig) ComputeDigest(data []byte) [32]byte {
 	h := sha256.New()
 	h.Write(data)          // plaintext data first
-	h.Write(cc.encKey)     // encryption key appended (NOT idKey!) - this was the main bug
+	h.Write(cc.idKey)      // id_key appended - PBS uses id_key per crypt_config.rs in proxmox-backup-client
 	var digest [32]byte
 	copy(digest[:], h.Sum(nil))
 	return digest

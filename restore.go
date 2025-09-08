@@ -114,8 +114,8 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 			return fmt.Errorf("failed to download chunk %s: %v", digestHex, err)
 		}
 		
-		// Decode DataBlob (handles both encrypted and unencrypted)
-		plaintext, err := DecodeDataBlob(chunkDataBlob, cryptConfig)
+		// Decode DataBlob with digest validation for data integrity
+		plaintext, err := DecodeDataBlobWithDigest(chunkDataBlob, cryptConfig, chunk.digest)
 		if err != nil {
 			return fmt.Errorf("failed to decode chunk %s: %v", digestHex, err)
 		}
@@ -294,8 +294,8 @@ func (r *RestoreReader) loadDataForPosition(pos int64) error {
 		return fmt.Errorf("failed to download chunk %s: %v", digestHex, err)
 	}
 	
-	// Decode DataBlob (handles both encrypted and unencrypted)
-	plaintext, err := DecodeDataBlob(chunkDataBlob, r.cryptConfig)
+	// Decode DataBlob with digest validation for data integrity
+	plaintext, err := DecodeDataBlobWithDigest(chunkDataBlob, r.cryptConfig, r.chunks[chunkIndex].digest)
 	if err != nil {
 		return fmt.Errorf("failed to decode chunk %s: %v", digestHex, err)
 	}
