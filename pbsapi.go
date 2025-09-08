@@ -274,7 +274,7 @@ func (pbs *PBSClient) CloseDynamicIndex(writerid uint64, checksum string, totals
 
 	
 	if resp2.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp2.Body)
+		_, _ = io.ReadAll(resp2.Body)
 		resp2.Body.Close()
 		return fmt.Errorf("close dynamic index failed with status %d", resp2.StatusCode)
 	}

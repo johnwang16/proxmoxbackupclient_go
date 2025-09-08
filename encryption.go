@@ -127,7 +127,7 @@ func NewCryptConfig(keyPath string, password string, masterKeyPath string) (*Cry
 		return nil, fmt.Errorf("failed to create AES cipher: %v", err)
 	}
 
-	// Use NewGCMWithNonceSize to support 16-byte IVs natively (discovered solution)
+	// Use NewGCMWithNonceSize to support 16-byte IVs natively
 	gcm, err := cipher.NewGCMWithNonceSize(block, 16)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCM with 16-byte nonce support: %v", err)
