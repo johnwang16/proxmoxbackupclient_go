@@ -1,4 +1,7 @@
 {
+  "comment": "Example configuration with encryption enabled for both backup and restore",
+  
+  "comment": "Connection settings",
   "baseurl": "https://your-pbs-server:8007",
   "certfingerprint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
   "authid": "user@realm!apitoken",
@@ -6,10 +9,21 @@
   "datastore": "your-datastore",
   "namespace": "",
   "backup-id": "",
+  
+  "comment": "Backup settings (used without -restore flag)",
   "backupdir": "C:\\path\\to\\backup",
+  
+  "comment": "Restore settings (used with -restore flag)",
+  "restore-archive": "backup.pxar.didx",
+  "restore-output": "C:\\path\\to\\restore",
+  "restore-snapshot": "latest",
+  
+  "comment": "Encryption settings (required for encrypted backups)",
   "encryption-key-path": "C:\\path\\to\\encryption-key.json",
   "encryption-password": "your-encryption-password",
   "master-key-path": "C:\\path\\to\\master-key-public.pem",
+  
+  "comment": "Email notification settings (optional)",
   "smtp": {
     "host": "smtp.example.com",
     "port": "587",
