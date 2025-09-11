@@ -527,32 +527,52 @@ func ExtractPXARFromReader(reader io.ReadSeeker, outputDir string) error {
 		return fmt.Errorf("failed to create output directory: %v", err)
 	}
 	
-	return extractPXARRecursive(reader, outputDir, "")
+	// Extract the entire archive using directory stack approach like Rust implementation
+	return extractPXARWithDirectoryStack(reader, outputDir)
 }
 
-// extractPXARRecursive recursively extracts PXAR entries
-func extractPXARRecursive(reader io.ReadSeeker, baseDir string, currentPath string) error {
+
+// Directory stack entry for tracking PXAR directory context
+type DirectoryStackEntry struct {
+	path     string
+	baseDir  string
+	filename string
+}
+
+// extractPXARWithDirectoryStack extracts PXAR using directory stack management like Rust implementation
+func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
+	// Initialize directory stack with root entry
+	directoryStack := []DirectoryStackEntry{{
+		path:     "",
+		baseDir:  baseDir,
+		filename: "",
+	}}
+	
+	var currentFilename string
+	
 	for {
 		// Read PXAR header
 		var header PXARHeader
 		err := binary.Read(reader, binary.LittleEndian, &header)
 		if err != nil {
 			if err == io.EOF || err.Error() == "EOF" {
-				return nil // End of file
+				return nil // Normal end of archive
 			}
 			return fmt.Errorf("failed to read PXAR header: %v", err)
 		}
 		
-		// Validate header length to prevent seeking beyond stream
-		if header.Length < 16 || header.Length > 0x7FFFFFFF {
+		// Validate header length
+		if header.Length < 16 || header.Length > 0x10000000000 { // 1TB max
 			return fmt.Errorf("invalid PXAR header length: %d (type: 0x%x)", header.Length, header.Type)
 		}
+		
+		currentDir := directoryStack[len(directoryStack)-1]
 		
 		// Handle different PXAR entry types
 		switch header.Type {
 		case PXAR_ENTRY, PXAR_ENTRY_V1:
 			// Read entry metadata
-			entryDataLength := header.Length - 16 // Subtract header size
+			entryDataLength := header.Length - 16
 			
 			var entry PXAREntry
 			err = binary.Read(reader, binary.LittleEndian, &entry)
@@ -560,8 +580,8 @@ func extractPXARRecursive(reader io.ReadSeeker, baseDir string, currentPath stri
 				return fmt.Errorf("failed to read PXAR entry: %v", err)
 			}
 			
-			// Skip any remaining entry data to stay aligned
-			structSize := int64(40) // Size of PXAREntry struct
+			// Skip any remaining entry data
+			structSize := int64(40)
 			remaining := int64(entryDataLength) - structSize
 			if remaining > 0 {
 				_, err = reader.Seek(remaining, 1)
@@ -570,47 +590,30 @@ func extractPXARRecursive(reader io.ReadSeeker, baseDir string, currentPath stri
 				}
 			}
 			
-			// Process the entry based on file type
-			fileType := entry.Mode & IFMT
-			switch fileType {
-			case IFDIR:
-				// Directory entry - create directory if not root
-				if currentPath != "" {
-					dirPath := filepath.Join(baseDir, currentPath)
-					err = os.MkdirAll(dirPath, os.FileMode(entry.Mode&0777))
-					if err != nil {
-						return fmt.Errorf("failed to create directory %s: %v", dirPath, err)
-					}
-				}
-				
-			case IFREG:
-				// Regular file - will be handled when PXAR_PAYLOAD is encountered
-				
-			case IFLNK:
-				// Symbolic link - will be handled when PXAR_SYMLINK is encountered
-				
-			default:
-				// Skip unsupported file types
-			}
-			
 		case PXAR_FILENAME:
 			// Read filename
-			nameLength := header.Length - 16 // Subtract header size
+			nameLength := header.Length - 16
 			nameBytes := make([]byte, nameLength)
 			_, err = reader.Read(nameBytes)
 			if err != nil {
 				return fmt.Errorf("failed to read filename: %v", err)
 			}
 			
-			// Remove null terminator and update current path
-			filename := string(bytes.TrimRight(nameBytes, "\x00"))
-			currentPath = filename
+			// Remove null terminator
+			currentFilename = string(bytes.TrimRight(nameBytes, "\x00"))
 			
 		case PXAR_PAYLOAD:
-			// File content
-			payloadLength := header.Length - 16 // Subtract header size
-			if currentPath != "" {
-				filePath := filepath.Join(baseDir, currentPath)
+			// File content - this means currentFilename is a file
+			payloadLength := header.Length - 16
+			
+			if currentFilename != "" {
+				// Build full file path using directory stack
+				var filePath string
+				if currentDir.path == "" {
+					filePath = filepath.Join(currentDir.baseDir, currentFilename)
+				} else {
+					filePath = filepath.Join(currentDir.baseDir, currentDir.path, currentFilename)
+				}
 				
 				// Create parent directory if needed
 				err = os.MkdirAll(filepath.Dir(filePath), 0755)
@@ -631,9 +634,13 @@ func extractPXARRecursive(reader io.ReadSeeker, baseDir string, currentPath stri
 					return fmt.Errorf("failed to write file content: %v", err)
 				}
 				
-				fmt.Printf("Extracted file: %s (%d bytes)\n", currentPath, payloadLength)
+				if currentDir.path == "" {
+					fmt.Printf("Extracted file: %s (%d bytes)\n", currentFilename, payloadLength)
+				} else {
+					fmt.Printf("Extracted file: %s/%s (%d bytes)\n", currentDir.path, currentFilename, payloadLength)
+				}
+				currentFilename = "" // Reset after extracting file
 			} else {
-				// Skip payload if no filename
 				_, err = reader.Seek(int64(payloadLength), 1)
 				if err != nil {
 					return fmt.Errorf("failed to skip payload: %v", err)
@@ -649,39 +656,102 @@ func extractPXARRecursive(reader io.ReadSeeker, baseDir string, currentPath stri
 				return fmt.Errorf("failed to read symlink target: %v", err)
 			}
 			
-			if currentPath != "" {
-				linkPath := filepath.Join(baseDir, currentPath)
+			if currentFilename != "" {
+				// Build full symlink path using directory stack
+				var linkPath string
+				if currentDir.path == "" {
+					linkPath = filepath.Join(currentDir.baseDir, currentFilename)
+				} else {
+					linkPath = filepath.Join(currentDir.baseDir, currentDir.path, currentFilename)
+				}
 				linkTarget := string(bytes.TrimRight(linkBytes, "\x00"))
 				
 				err = os.Symlink(linkTarget, linkPath)
 				if err != nil {
 					fmt.Printf("Warning: failed to create symlink %s -> %s: %v\n", linkPath, linkTarget, err)
 				} else {
-					fmt.Printf("Extracted symlink: %s -> %s\n", currentPath, linkTarget)
+					if currentDir.path == "" {
+						fmt.Printf("Extracted symlink: %s -> %s\n", currentFilename, linkTarget)
+					} else {
+						fmt.Printf("Extracted symlink: %s/%s -> %s\n", currentDir.path, currentFilename, linkTarget)
+					}
 				}
+				currentFilename = "" // Reset after creating symlink
 			}
 			
 		case PXAR_GOODBYE:
-			// End of directory entries
-			return nil
+			// Skip any payload bytes for PXAR_GOODBYE
+			payloadLength := header.Length - 16
+			if payloadLength > 0 {
+				_, err = reader.Seek(int64(payloadLength), 1)
+				if err != nil {
+					return fmt.Errorf("failed to skip PXAR_GOODBYE payload: %v", err)
+				}
+			}
+			
+			// This means "leave current directory" like in Rust implementation
+			if len(directoryStack) > 1 {
+				// Pop from directory stack
+				directoryStack = directoryStack[:len(directoryStack)-1]
+				currentFilename = "" // Reset filename when leaving directory
+			} else {
+				// We're at the root, this might be end of archive
+				// Continue processing to see if there are more entries
+			}
 			
 		default:
 			// Skip unknown entry types
 			skipLength := header.Length - 16
 			if skipLength > 0 {
-				// Check if we can safely skip this amount
-				currentPos, _ := reader.Seek(0, 1)
-				newPos, err := reader.Seek(int64(skipLength), 1)
-				if err != nil || newPos < currentPos {
+				_, err := reader.Seek(int64(skipLength), 1)
+				if err != nil {
 					return fmt.Errorf("failed to skip unknown entry type 0x%x (length %d): %v", header.Type, skipLength, err)
 				}
 			}
 		}
 		
-		// PXAR entries are naturally aligned - no manual alignment needed
-		// Each entry header specifies its exact length including any necessary padding
+		// Check if we need to enter a directory (after processing PXAR_FILENAME for a directory)
+		// This happens when we have a filename that represents a directory
+		if currentFilename != "" {
+			// We need to check if this will be a directory by looking ahead for nested entries
+			// For now, we'll handle directory entry when we encounter the directory structure
+			// If the next entry is another PXAR_FILENAME, then currentFilename is a directory
+			
+			// Peek ahead to see if we're about to enter a directory
+			currentPos, _ := reader.Seek(0, 1)
+			var peekHeader PXARHeader
+			peekErr := binary.Read(reader, binary.LittleEndian, &peekHeader)
+			_, _ = reader.Seek(currentPos, 0) // Reset position
+			
+			if peekErr == nil && (peekHeader.Type == PXAR_FILENAME || peekHeader.Type == PXAR_GOODBYE) {
+				// This suggests currentFilename is a directory - push it onto stack
+				var newDirPath string
+				if currentDir.path == "" {
+					newDirPath = currentFilename
+				} else {
+					newDirPath = filepath.Join(currentDir.path, currentFilename)
+				}
+				
+				// Create the directory
+				fullDirPath := filepath.Join(currentDir.baseDir, newDirPath)
+				err = os.MkdirAll(fullDirPath, 0755)
+				if err != nil {
+					return fmt.Errorf("failed to create directory %s: %v", fullDirPath, err)
+				}
+				
+				// Push new directory onto stack
+				directoryStack = append(directoryStack, DirectoryStackEntry{
+					path:     newDirPath,
+					baseDir:  currentDir.baseDir,
+					filename: currentFilename,
+				})
+				fmt.Printf("Created directory: %s\n", newDirPath)
+				currentFilename = "" // Reset after entering directory
+			}
+		}
 	}
 }
+
 
 // Helper function to copy N bytes (like io.CopyN but with better error handling)
 func copyN(dst *os.File, src io.Reader, n int64) (int64, error) {

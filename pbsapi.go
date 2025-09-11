@@ -469,6 +469,7 @@ func (pbs *PBSClient) DownloadFile(filename string) ([]byte, error) {
 	q.Add("file-name", filename)
 	
 	url := pbs.baseurl + "/download?" + q.Encode()
+	
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -485,7 +486,11 @@ func (pbs *PBSClient) DownloadFile(filename string) ([]byte, error) {
 		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 	
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 
@@ -677,7 +682,9 @@ func (pbs *PBSClient) DownloadChunk(digest string) ([]byte, error) {
 	q := &url.Values{}
 	q.Add("digest", digest)
 
-	req, err := http.NewRequest("GET", pbs.baseurl+"/chunk?"+q.Encode(), nil)
+	url := pbs.baseurl + "/chunk?" + q.Encode()
+	
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -698,7 +705,7 @@ func (pbs *PBSClient) DownloadChunk(digest string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error reading chunk data: %v", err)
 	}
-
+	
 	return chunkData, nil
 }
 

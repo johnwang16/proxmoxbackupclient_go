@@ -84,7 +84,11 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 	didxEntries := didxData[4096:]
 	var chunks []DidxEntry
 	
+	
 	for i := 0; i*40 < len(didxEntries); i++ {
+		if i*40+40 > len(didxEntries) {
+			break
+		}
 		entry := DidxEntry{
 			offset: binary.LittleEndian.Uint64(didxEntries[i*40 : i*40+8]),
 			digest: make([]byte, 32),
@@ -93,7 +97,6 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 		chunks = append(chunks, entry)
 	}
 	
-	fmt.Printf("Found %d chunks to restore\n", len(chunks))
 	
 	// Create output file
 	outFile, err := os.Create(outputPath)
@@ -104,9 +107,10 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 	
 	// Download and reconstruct chunks
 	var totalBytes int64
-	for i, chunk := range chunks {
+	var previousOffset uint64 = 0
+	for _, chunk := range chunks {
 		digestHex := hex.EncodeToString(chunk.digest)
-		fmt.Printf("Restoring chunk %d/%d: %s (offset: %d)\n", i+1, len(chunks), digestHex, chunk.offset)
+		chunkSize := chunk.offset - previousOffset
 		
 		// Download chunk data (DataBlob format) using backup protocol
 		chunkDataBlob, err := client.DownloadChunk(digestHex)
@@ -120,7 +124,9 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 			return fmt.Errorf("failed to decode chunk %s: %v", digestHex, err)
 		}
 		
-		fmt.Printf("Writing %d bytes to file (total so far: %d)\n", len(plaintext), totalBytes+int64(len(plaintext)))
+		if uint64(len(plaintext)) != chunkSize {
+			fmt.Printf("WARNING: Chunk size mismatch! Expected %d, got %d\n", chunkSize, len(plaintext))
+		}
 		
 		// Write to output file
 		n, err := outFile.Write(plaintext)
@@ -131,6 +137,8 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 			return fmt.Errorf("incomplete write: wrote %d bytes, expected %d", n, len(plaintext))
 		}
 		totalBytes += int64(n)
+		previousOffset = chunk.offset
+		
 		
 		// Flush after each chunk for large files
 		err = outFile.Sync()
@@ -139,7 +147,7 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 		}
 	}
 	
-	fmt.Printf("Successfully restored %s\n", archiveName)
+	fmt.Printf("Successfully restored %s (total bytes written: %d)\n", archiveName, totalBytes)
 	return nil
 }
 
@@ -309,7 +317,6 @@ func (r *RestoreReader) loadDataForPosition(pos int64) error {
 	} else {
 		r.dataOffset = int64(r.chunks[chunkIndex-1].offset)
 	}
-	fmt.Printf("Restoring chunk %d/%d: %s\n", chunkIndex+1, r.totalChunks, digestHex)
 	
 	return nil
 }
@@ -386,7 +393,11 @@ func createRestoreReader(client *PBSClient, archiveName string, cryptConfig *Cry
 	didxEntries := didxData[4096:]
 	var chunks []DidxEntry
 	
+	
 	for i := 0; i*40 < len(didxEntries); i++ {
+		if i*40+40 > len(didxEntries) {
+			break
+		}
 		entry := DidxEntry{
 			offset: binary.LittleEndian.Uint64(didxEntries[i*40 : i*40+8]),
 			digest: make([]byte, 32),
@@ -395,7 +406,6 @@ func createRestoreReader(client *PBSClient, archiveName string, cryptConfig *Cry
 		chunks = append(chunks, entry)
 	}
 	
-	fmt.Printf("Found %d chunks to restore\n", len(chunks))
 	
 	return &RestoreReader{
 		client:      client,
