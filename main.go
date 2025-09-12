@@ -482,7 +482,9 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 				e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
 				e.digest = previousDidx[i*40+8 : i*40+40]
 				shahash := hex.EncodeToString(e.digest)
-				fmt.Printf("Previous: %s\n", shahash)
+				if config.Debug {
+					fmt.Printf("Previous: %s\n", shahash)
+				}
 				knownChunks.Set(shahash, true)
 			}
 		}
@@ -492,30 +494,37 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 
 	fmt.Printf("Known chunks: %d!\n", knownChunks.Len())
 
-	streamChunk := ChunkState{}
-	streamChunk.Init(newchunk, reusechunk, knownChunks, cryptConfig)
+	// Use parallel processing for stream backups
+	streamChunk := &ParallelChunkState{}
+	streamChunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config.Debug, config.Performance)
 
 	streamChunk.wrid, err = client.CreateDynamicIndex(filename)
 	if err != nil {
 		return err
 	}
-	B := make([]byte, 65536)
+	
+	// Start parallel processing pipeline
+	streamChunk.StartParallel(client)
+	
+	// Use configurable buffer for I/O throughput
+	bufferSizes := config.Performance.GetBufferSizes()
+	B := make([]byte, bufferSizes.StreamReadBuffer)
 	for {
 		
 		n, err := stream.Read(B)
 		
 		b := B[:n]
 		
-		streamChunk.HandleData(b, client)
+		streamChunk.HandleData(b)
 
 		if err == io.EOF {
 			break
 		}
 	}
 
-	streamChunk.Eof(client)
+	streamChunk.Eof()
 
-	client.CloseDynamicIndex(streamChunk.wrid, hex.EncodeToString(streamChunk.chunkdigests.Sum(nil)), streamChunk.pos, streamChunk.chunkcount)
+	// CloseDynamicIndex is now handled inside Eof()
 
 	err = client.UploadManifest()
 	if err != nil {
@@ -541,6 +550,7 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 
 	archive := &PXARArchive{}
 	archive.archivename = "backup.pxar.didx"
+	archive.perfConfig = config.Performance
 
 	forceFullBackup := config.ForceFullBackup
 	
@@ -584,7 +594,9 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 				e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
 				e.digest = previousDidx[i*40+8 : i*40+40]
 				shahash := hex.EncodeToString(e.digest)
-				fmt.Printf("Previous: %s\n", shahash)
+				if config.Debug {
+					fmt.Printf("Previous: %s\n", shahash)
+				}
 				knownChunks.Set(shahash, true)
 			}
 		}
@@ -603,11 +615,12 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	}
 	/**/
 
-	pxarChunk := ChunkState{}
-	pxarChunk.Init(newchunk, reusechunk, knownChunks, cryptConfig)
+	// Use parallel processing for PXAR backups
+	pxarChunk := &ParallelChunkState{}
+	pxarChunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config.Debug, config.Performance)
 
-	pcat1Chunk := ChunkState{}
-	pcat1Chunk.Init(newchunk, reusechunk, knownChunks, cryptConfig)
+	pcat1Chunk := &ParallelChunkState{}
+	pcat1Chunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config.Debug, config.Performance)
 
 	pxarChunk.wrid, err = client.CreateDynamicIndex(archive.archivename)
 	if err != nil {
@@ -618,6 +631,10 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 		return err
 	}
 
+	// Start parallel processing pipelines
+	pxarChunk.StartParallel(client)
+	pcat1Chunk.StartParallel(client)
+
 	archive.writeCB = func(b []byte) {
 		
 
@@ -626,13 +643,13 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 			f.Write(b)
 		}
 
-		pxarChunk.HandleData(b, client)
+		pxarChunk.HandleData(b)
 
 		//
 	}
 
 	archive.catalogWriteCB = func(b []byte) {
-		pcat1Chunk.HandleData(b, client)
+		pcat1Chunk.HandleData(b)
 	}
 
 	//This is the entry point of backup job which will start streaming with the PCAT and PXAR write callback
@@ -641,8 +658,9 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	archive.WriteDir(backupdir, "", true)
 
 	
-	pxarChunk.Eof(client)
-	pcat1Chunk.Eof(client)
+	pxarChunk.Eof()
+	pcat1Chunk.Eof()
+	// Note: Eof() now handles CloseDynamicIndex internally
 
 	
 

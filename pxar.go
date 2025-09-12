@@ -174,6 +174,7 @@ type PXARArchive struct {
 	buffer         bytes.Buffer
 	pos            uint64
 	archivename    string
+	perfConfig     *PerformanceConfig
 
 	catalog_pos uint64
 }
@@ -184,7 +185,12 @@ type PXARArchive struct {
 
 func (a *PXARArchive) Flush() {
 
-	b := make([]byte, 64*1024)
+	// Use configurable buffer size for optimal performance
+	bufferSize := 64 * 1024 // Default fallback
+	if a.perfConfig != nil {
+		bufferSize = a.perfConfig.GetBufferSizes().PXARFlushBuffer
+	}
+	b := make([]byte, bufferSize)
 	for {
 		count, _ := a.buffer.Read(b)
 		if count <= 0 {
@@ -484,8 +490,18 @@ func (a *PXARArchive) WriteFile(path string, basename string) CatalogFile {
 
 	a.Flush()
 
-	readbuffer := make([]byte, 1024*64)
+	// Use configurable buffer for file reading
+	bufferSize := 64 * 1024 // Default fallback
+	if a.perfConfig != nil {
+		bufferSize = a.perfConfig.GetBufferSizes().FileReadBuffer
+	}
+	readbuffer := make([]byte, bufferSize)
 
+	// Accumulate data in buffer before flushing to reduce I/O operations
+	flushThreshold := 16 * 1024 * 1024 // Default fallback
+	if a.perfConfig != nil {
+		flushThreshold = a.perfConfig.GetBufferSizes().PXARThreshold
+	}
 	for {
 		nread, err := file.Read(readbuffer)
 		if nread <= 0 {
@@ -495,7 +511,11 @@ func (a *PXARArchive) WriteFile(path string, basename string) CatalogFile {
 			panic(err.Error())
 		}
 		a.buffer.Write(readbuffer[:nread])
-		a.Flush()
+		
+		// Only flush when buffer reaches threshold or at end of file
+		if a.buffer.Len() >= flushThreshold {
+			a.Flush()
+		}
 	}
 
 	a.Flush()

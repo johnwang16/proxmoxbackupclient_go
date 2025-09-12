@@ -42,7 +42,9 @@ type Config struct {
 	EncryptionPassword   string      `json:"encryption-password"`
 	MasterKeyPath        string      `json:"master-key-path"`
 	ForceFullBackup      bool        `json:"force-full-backup"`
-	SMTP                 *SMTPConfig `json:"smtp"`
+	Debug                bool               `json:"debug"`
+	Performance          *PerformanceConfig `json:"performance"`
+	SMTP                 *SMTPConfig        `json:"smtp"`
 	
 	// Restore options
 	RestoreArchive       string      `json:"restore-archive"`
@@ -115,6 +117,14 @@ func loadConfig() (*Config, bool) {
 	encryptionPasswordFlag := flag.String("encryption-password", "", "Password for encrypted key file (optional)")
 	masterKeyPathFlag := flag.String("master-key-path", "", "Path to RSA master key for key recovery (optional)")
 	forceFullBackupFlag := flag.Bool("force-full-backup", false, "Force a full backup, ignoring previous backup for incremental deduplication (optional)")
+	debugFlag := flag.Bool("debug", false, "Enable debug output for chunk processing (optional)")
+	
+	// Performance tuning flags
+	fileReadBufferFlag := flag.Int("file-read-buffer-mb", 0, "File read buffer size in MB (0=auto) (optional)")
+	streamReadBufferFlag := flag.Int("stream-read-buffer-mb", 0, "Stream read buffer size in MB (0=auto) (optional)")
+	workerCountFlag := flag.Int("worker-count", 0, "Number of parallel workers (0=auto) (optional)")
+	highPerformanceFlag := flag.Bool("high-performance", false, "Use high-performance settings for fast systems (optional)")
+	lowMemoryFlag := flag.Bool("low-memory", false, "Use low-memory settings for resource-constrained systems (optional)")
 
 	// Restore flags
 	restoreModeFlag := flag.Bool("restore", false, "Enable restore mode instead of backup mode")
@@ -234,6 +244,37 @@ func loadConfig() (*Config, bool) {
 	if *forceFullBackupFlag {
 		config.ForceFullBackup = *forceFullBackupFlag
 	}
+	if *debugFlag {
+		config.Debug = *debugFlag
+	}
+	
+	// Initialize performance configuration
+	if config.Performance == nil {
+		if *highPerformanceFlag {
+			perfConfig := HighPerformanceConfig()
+			config.Performance = &perfConfig
+		} else if *lowMemoryFlag {
+			perfConfig := LowMemoryConfig()
+			config.Performance = &perfConfig
+		} else {
+			perfConfig := DefaultPerformanceConfig()
+			config.Performance = &perfConfig
+		}
+	}
+	
+	// Override performance settings from command line flags
+	if *fileReadBufferFlag > 0 {
+		config.Performance.FileReadBufferMB = *fileReadBufferFlag
+	}
+	if *streamReadBufferFlag > 0 {
+		config.Performance.StreamReadBufferMB = *streamReadBufferFlag
+	}
+	if *workerCountFlag > 0 {
+		config.Performance.WorkerCount = *workerCountFlag
+	}
+	
+	// Validate the final configuration
+	config.Performance.ValidateConfig()
 
 	// Set restore flags - archive and snapshot have defaults
 	config.RestoreArchive = *restoreArchiveFlag  // Default: "backup.pxar.didx"
