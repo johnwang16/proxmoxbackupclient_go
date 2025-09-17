@@ -152,7 +152,7 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 }
 
 // restorePXAR restores a PXAR archive and extracts it to a directory
-func restorePXAR(client *PBSClient, outputDir string, cryptConfig *CryptConfig, snapshotTime string) error {
+func restorePXAR(client *PBSClient, outputDir string, cryptConfig *CryptConfig, snapshotTime string, restorePath string) error {
 	archiveName := "backup.pxar.didx"
 	
 	// Create output directory if it doesn't exist
@@ -161,7 +161,11 @@ func restorePXAR(client *PBSClient, outputDir string, cryptConfig *CryptConfig, 
 		return fmt.Errorf("failed to create output directory: %v", err)
 	}
 	
-	fmt.Printf("Extracting PXAR archive to: %s\n", outputDir)
+	if restorePath != "" {
+		fmt.Printf("Extracting PXAR archive to: %s (filtering for: %s)\n", outputDir, restorePath)
+	} else {
+		fmt.Printf("Extracting PXAR archive to: %s\n", outputDir)
+	}
 	
 	// Create streaming restore reader
 	pxarReader, err := createRestoreReader(client, archiveName, cryptConfig, snapshotTime)
@@ -171,7 +175,7 @@ func restorePXAR(client *PBSClient, outputDir string, cryptConfig *CryptConfig, 
 	defer pxarReader.Close()
 	
 	// Use native PXAR extraction directly from stream
-	err = ExtractPXARFromReader(pxarReader, outputDir)
+	err = ExtractPXARFromReader(pxarReader, outputDir, restorePath)
 	if err != nil {
 		return fmt.Errorf("PXAR extraction failed: %v", err)
 	}

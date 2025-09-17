@@ -8,6 +8,7 @@ import (
 	"math/bits"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	//	"io/ioutil"
@@ -565,19 +566,19 @@ func ExtractPXAR(pxarFile string, outputDir string) error {
 	}
 	defer file.Close()
 	
-	return ExtractPXARFromReader(file, outputDir)
+	return ExtractPXARFromReader(file, outputDir, "")
 }
 
 // ExtractPXARFromReader extracts a PXAR archive from an io.ReadSeeker to the specified directory
-func ExtractPXARFromReader(reader io.ReadSeeker, outputDir string) error {
+func ExtractPXARFromReader(reader io.ReadSeeker, outputDir string, filterPath string) error {
 	// Create output directory if it doesn't exist
 	err := os.MkdirAll(outputDir, 0755)
 	if err != nil {
 		return fmt.Errorf("failed to create output directory: %v", err)
 	}
 	
-	// Extract the entire archive using directory stack approach like Rust implementation
-	return extractPXARWithDirectoryStack(reader, outputDir)
+	// Extract the archive with optional path filtering
+	return extractPXARWithDirectoryStack(reader, outputDir, filterPath)
 }
 
 
@@ -588,8 +589,22 @@ type DirectoryStackEntry struct {
 	filename string
 }
 
+// shouldExtractPath determines if a path should be extracted based on the filter
+func shouldExtractPath(fullPath string, filterPath string) bool {
+	if filterPath == "" {
+		return true // No filter, extract everything
+	}
+	
+	// Normalize paths for case-insensitive comparison
+	fullPath = strings.ToLower(filepath.Clean(fullPath))
+	filterPath = strings.ToLower(filepath.Clean(filterPath))
+	
+	// Check if the path matches or is under the filter path
+	return fullPath == filterPath || strings.HasPrefix(fullPath, filterPath+string(filepath.Separator))
+}
+
 // extractPXARWithDirectoryStack extracts PXAR using directory stack management like Rust implementation
-func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
+func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string, filterPath string) error {
 	// Initialize directory stack with root entry
 	directoryStack := []DirectoryStackEntry{{
 		path:     "",
@@ -662,10 +677,25 @@ func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
 			if currentFilename != "" {
 				// Build full file path using directory stack
 				var filePath string
+				var relativePath string
 				if currentDir.path == "" {
 					filePath = filepath.Join(currentDir.baseDir, currentFilename)
+					relativePath = currentFilename
 				} else {
 					filePath = filepath.Join(currentDir.baseDir, currentDir.path, currentFilename)
+					relativePath = filepath.Join(currentDir.path, currentFilename)
+				}
+				
+				// Check if this file should be extracted based on filter
+				if !shouldExtractPath(relativePath, filterPath) {
+					// Skip this file - just read and discard the payload
+					_, err = reader.Seek(int64(payloadLength), 1)
+					if err != nil {
+						return fmt.Errorf("failed to skip filtered file payload: %v", err)
+					}
+					currentFilename = ""
+					currentEntry = nil
+					continue
 				}
 				
 				// Create parent directory if needed
@@ -819,15 +849,19 @@ func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
 					newDirPath = filepath.Join(currentDir.path, currentFilename)
 				}
 				
-				// Create the directory
-				fullDirPath := filepath.Join(currentDir.baseDir, newDirPath)
-				err = os.MkdirAll(fullDirPath, 0755)
-				if err != nil {
-					return fmt.Errorf("failed to create directory %s: %v", fullDirPath, err)
-				}
+				// Check if this directory should be extracted based on filter
+				shouldExtract := shouldExtractPath(newDirPath, filterPath)
 				
-				// Apply directory attributes if we have metadata
-				if currentEntry != nil {
+				if shouldExtract {
+					// Create the directory
+					fullDirPath := filepath.Join(currentDir.baseDir, newDirPath)
+					err = os.MkdirAll(fullDirPath, 0755)
+					if err != nil {
+						return fmt.Errorf("failed to create directory %s: %v", fullDirPath, err)
+					}
+					
+					// Apply directory attributes if we have metadata
+					if currentEntry != nil {
 					// Apply permissions
 					dirMode := os.FileMode(currentEntry.Mode & 0777)
 					err = os.Chmod(fullDirPath, dirMode)
@@ -841,21 +875,23 @@ func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
 						// This is expected to fail for non-root users, so don't print warning
 					}
 					
-					// Apply timestamps
-					mtime := time.Unix(int64(currentEntry.MTime), int64(currentEntry.MTimeNs))
-					err = os.Chtimes(fullDirPath, mtime, mtime)
-					if err != nil {
-						fmt.Printf("Warning: failed to set timestamps for directory %s: %v\n", fullDirPath, err)
+						// Apply timestamps
+						mtime := time.Unix(int64(currentEntry.MTime), int64(currentEntry.MTimeNs))
+						err = os.Chtimes(fullDirPath, mtime, mtime)
+						if err != nil {
+							fmt.Printf("Warning: failed to set timestamps for directory %s: %v\n", fullDirPath, err)
+						}
 					}
+					
+					fmt.Printf("Created directory: %s\n", newDirPath)
 				}
 				
-				// Push new directory onto stack
+				// Always push directory onto stack (even if filtered) for proper traversal
 				directoryStack = append(directoryStack, DirectoryStackEntry{
 					path:     newDirPath,
 					baseDir:  currentDir.baseDir,
 					filename: currentFilename,
 				})
-				fmt.Printf("Created directory: %s\n", newDirPath)
 				currentFilename = "" // Reset after entering directory
 				currentEntry = nil   // Reset entry metadata
 			}

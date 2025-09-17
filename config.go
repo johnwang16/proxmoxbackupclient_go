@@ -90,7 +90,7 @@ func (c *Config) valid(isRestore bool) bool {
 	return true
 }
 
-func loadConfig() (*Config, bool) {
+func loadConfig() (*Config, bool, string) {
 	// Define flags
 	baseURLFlag := flag.String("baseurl", "", "Base URL for the proxmox backup server, example: https://192.168.1.10:8007")
 	certFingerprintFlag := flag.String("certfingerprint", "", "Certificate fingerprint for SSL connection, example: ea:7d:06:f9...")
@@ -125,7 +125,7 @@ func loadConfig() (*Config, bool) {
 	workerCountFlag := flag.Int("worker-count", 0, "Number of parallel workers (0=auto) (optional)")
 
 	// Restore flags
-	restoreModeFlag := flag.Bool("restore", false, "Enable restore mode instead of backup mode")
+	restoreFlag := flag.String("restore", "", "Enable restore mode with optional path filter (e.g., --restore=path/to/file or --restore=\"\" for everything)")
 	restoreArchiveFlag := flag.String("restore-archive", "backup.pxar.didx", "Archive name to restore (defaults to backup.pxar.didx)")
 	restoreOutputFlag := flag.String("restore-output", "", "Output path for restored data (required when using -restore)")
 	restoreSnapshotFlag := flag.String("restore-snapshot", "latest", "Backup snapshot timestamp (e.g., 2024-01-01T12:00:00Z) or 'latest' for most recent (default: latest)")
@@ -274,6 +274,12 @@ func loadConfig() (*Config, bool) {
 	config.RestoreSnapshot = *restoreSnapshotFlag  // Default: "latest"
 	config.ListSnapshots = *listSnapshotsFlag
 
-	// Return config and restore mode flag (command-line only, not stored in config)
-	return config, *restoreModeFlag
+	// Return config and restore info (path from flag, mode determined by flag being set)
+	restoreFlagSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "restore" {
+			restoreFlagSet = true
+		}
+	})
+	return config, restoreFlagSet, *restoreFlag
 }

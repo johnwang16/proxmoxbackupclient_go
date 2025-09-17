@@ -227,7 +227,7 @@ func main() {
 	var newchunk *atomic.Uint64 = new(atomic.Uint64)
 	var reusechunk *atomic.Uint64 = new(atomic.Uint64)
 
-	cfg, isRestore := loadConfig()
+	cfg, isRestore, restorePath := loadConfig()
 	cfg.InitializeLogLevel()
 	
 	// Show worker count for all parallel operations
@@ -349,7 +349,7 @@ func main() {
 		// Determine restore type based on archive name
 		if strings.HasSuffix(cfg.RestoreArchive, ".pxar.didx") {
 			// Full PXAR restore
-			err = restorePXAR(client, cfg.RestoreOutput, cryptConfig, cfg.RestoreSnapshot)
+			err = restorePXAR(client, cfg.RestoreOutput, cryptConfig, cfg.RestoreSnapshot, restorePath)
 		} else {
 			// Generic archive restore
 			err = restoreBackup(client, cfg.RestoreArchive, cfg.RestoreOutput, cryptConfig, cfg.RestoreSnapshot)
