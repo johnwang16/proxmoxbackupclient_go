@@ -41,5 +41,10 @@
             "from": "sender@example.com",
             "to": "receiver@example.com"
         }]
-    }
+    },
+    
+    "comment": "Usage examples:",
+    "comment": "  For backup: proxmoxbackupgo.exe -config config.combined.example.json",
+    "comment": "  For full restore: proxmoxbackupgo.exe -config config.combined.example.json -restore \"*\"",
+    "comment": "  For selective restore: proxmoxbackupgo.exe -config config.combined.example.json -restore \"Documents/folder\""
 }

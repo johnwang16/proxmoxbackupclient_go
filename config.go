@@ -125,7 +125,8 @@ func loadConfig() (*Config, bool, string) {
 	workerCountFlag := flag.Int("worker-count", 0, "Number of parallel workers (0=auto) (optional)")
 
 	// Restore flags
-	restoreFlag := flag.String("restore", "", "Enable restore mode with optional path filter (e.g., --restore=path/to/file or --restore=\"\" for everything)")
+	// Note: Use -restore=* or just -restore * to restore everything, or -restore=path for specific path
+	restoreFlag := flag.String("restore", "", "Enable restore mode with optional path filter (use '*' to restore everything)")
 	restoreArchiveFlag := flag.String("restore-archive", "backup.pxar.didx", "Archive name to restore (defaults to backup.pxar.didx)")
 	restoreOutputFlag := flag.String("restore-output", "", "Output path for restored data (required when using -restore)")
 	restoreSnapshotFlag := flag.String("restore-snapshot", "latest", "Backup snapshot timestamp (e.g., 2024-01-01T12:00:00Z) or 'latest' for most recent (default: latest)")
@@ -276,10 +277,17 @@ func loadConfig() (*Config, bool, string) {
 
 	// Return config and restore info (path from flag, mode determined by flag being set)
 	restoreFlagSet := false
+	restorePath := ""
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "restore" {
 			restoreFlagSet = true
+			// Handle special case: "*" means restore everything (same as empty)
+			if *restoreFlag == "*" {
+				restorePath = ""
+			} else {
+				restorePath = *restoreFlag
+			}
 		}
 	})
-	return config, restoreFlagSet, *restoreFlag
+	return config, restoreFlagSet, restorePath
 }

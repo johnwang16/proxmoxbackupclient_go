@@ -185,8 +185,8 @@ This will show available snapshots with timestamps, files, and encryption status
 ### Restore Parameters
 
 ```
-  -restore
-        Enable restore mode instead of backup mode
+  -restore string
+        Enable restore mode with optional path filter (use '*' to restore everything)
   -restore-archive string
         Archive name to restore (defaults to "backup.pxar.didx")
   -restore-output string
@@ -195,6 +195,16 @@ This will show available snapshots with timestamps, files, and encryption status
         Backup snapshot timestamp (e.g., "1704110400" or "2024-01-01T12:00:00Z") 
         or 'latest' for most recent (default: "latest")
 ```
+
+### Selective Restore
+
+The restore functionality supports selective restoration of specific files or directories:
+
+- **Restore everything**: `-restore "*"` or `-restore="*"`
+- **Restore specific path**: `-restore="path/to/file"` or `-restore="directory/"`
+- **Case-insensitive filtering**: Path matching is case-insensitive for better cross-platform compatibility
+
+When using selective restore, only files and directories matching the specified path will be extracted.
 
 ### How Restore Works
 
@@ -224,19 +234,24 @@ failed to decode chunk abc123...: detected chunk with wrong digest
 
 ### Restore Examples
 
-**Basic restore (uses defaults: backup.pxar.didx, latest snapshot):**
+**Restore everything (uses defaults: backup.pxar.didx, latest snapshot):**
 ```shell
-proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore -restore-output "C:\restored"
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore "*" -restore-output "C:\restored"
+```
+
+**Restore specific file or directory:**
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore "Documents/important.txt" -restore-output "C:\restored"
 ```
 
 **Restore specific snapshot with encryption:**
 ```shell
-proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore -restore-output "C:\restored" -restore-snapshot "1704110400" -encryption-key-path "backup.key" -encryption-password "mypass123"
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore "*" -restore-output "C:\restored" -restore-snapshot "1704110400" -encryption-key-path "backup.key" -encryption-password "mypass123"
 ```
 
 **Restore stream backup to file:**
 ```shell
-proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore -restore-archive "database.sql.didx" -restore-output "C:\database-restored.sql"
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore "*" -restore-archive "database.sql.didx" -restore-output "C:\database-restored.sql"
 ```
 
 ### Using Config Files for Both Backup and Restore
@@ -274,12 +289,17 @@ proxmoxbackupgo.exe -config config.json
 
 **For restore mode (same config file):**
 ```shell
-proxmoxbackupgo.exe -config config.json -restore
+proxmoxbackupgo.exe -config config.json -restore "*"
+```
+
+**Restore specific path:**
+```shell
+proxmoxbackupgo.exe -config config.json -restore "Documents/folder"
 ```
 
 **Override config values:**
 ```shell
-proxmoxbackupgo.exe -config config.json -restore -restore-output "D:\\different-location"
+proxmoxbackupgo.exe -config config.json -restore "*" -restore-output "D:\\different-location"
 ```
 
 
