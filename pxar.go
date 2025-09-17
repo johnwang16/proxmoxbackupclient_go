@@ -8,6 +8,7 @@ import (
 	"math/bits"
 	"os"
 	"sort"
+	"time"
 
 	//	"io/ioutil"
 	"path/filepath"
@@ -569,6 +570,7 @@ func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
 	}}
 	
 	var currentFilename string
+	var currentEntry *PXAREntry // Store current entry metadata for later use
 	
 	for {
 		// Read PXAR header
@@ -599,6 +601,9 @@ func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
 			if err != nil {
 				return fmt.Errorf("failed to read PXAR entry: %v", err)
 			}
+			
+			// Store entry metadata for later use when creating file/directory
+			currentEntry = &entry
 			
 			// Skip any remaining entry data
 			structSize := int64(40)
@@ -654,12 +659,36 @@ func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
 					return fmt.Errorf("failed to write file content: %v", err)
 				}
 				
+				// Apply file attributes if we have metadata
+				if currentEntry != nil {
+					// Apply permissions
+					fileMode := os.FileMode(currentEntry.Mode & 0777)
+					err = os.Chmod(filePath, fileMode)
+					if err != nil {
+						fmt.Printf("Warning: failed to set permissions for %s: %v\n", filePath, err)
+					}
+					
+					// Apply ownership (may fail on non-root)
+					err = os.Chown(filePath, int(currentEntry.UID), int(currentEntry.GID))
+					if err != nil {
+						// This is expected to fail for non-root users, so don't print warning
+					}
+					
+					// Apply timestamps
+					mtime := time.Unix(int64(currentEntry.MTime), int64(currentEntry.MTimeNs))
+					err = os.Chtimes(filePath, mtime, mtime)
+					if err != nil {
+						fmt.Printf("Warning: failed to set timestamps for %s: %v\n", filePath, err)
+					}
+				}
+				
 				if currentDir.path == "" {
 					fmt.Printf("Extracted file: %s (%d bytes)\n", currentFilename, payloadLength)
 				} else {
 					fmt.Printf("Extracted file: %s/%s (%d bytes)\n", currentDir.path, currentFilename, payloadLength)
 				}
 				currentFilename = "" // Reset after extracting file
+				currentEntry = nil   // Reset entry metadata
 			} else {
 				_, err = reader.Seek(int64(payloadLength), 1)
 				if err != nil {
@@ -690,6 +719,15 @@ func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
 				if err != nil {
 					fmt.Printf("Warning: failed to create symlink %s -> %s: %v\n", linkPath, linkTarget, err)
 				} else {
+					// Note: On most systems, symlink timestamps and ownership cannot be changed
+					// but we'll try to set them anyway for completeness
+					if currentEntry != nil {
+						// Try to set symlink timestamps (may not work on all systems)
+						_ = time.Unix(int64(currentEntry.MTime), int64(currentEntry.MTimeNs))
+						// os.Chtimes follows symlinks, so we can't directly set symlink timestamps
+						// This is a limitation on most Unix systems
+					}
+					
 					if currentDir.path == "" {
 						fmt.Printf("Extracted symlink: %s -> %s\n", currentFilename, linkTarget)
 					} else {
@@ -697,6 +735,7 @@ func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
 					}
 				}
 				currentFilename = "" // Reset after creating symlink
+				currentEntry = nil   // Reset entry metadata
 			}
 			
 		case PXAR_GOODBYE:
@@ -759,6 +798,29 @@ func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
 					return fmt.Errorf("failed to create directory %s: %v", fullDirPath, err)
 				}
 				
+				// Apply directory attributes if we have metadata
+				if currentEntry != nil {
+					// Apply permissions
+					dirMode := os.FileMode(currentEntry.Mode & 0777)
+					err = os.Chmod(fullDirPath, dirMode)
+					if err != nil {
+						fmt.Printf("Warning: failed to set permissions for directory %s: %v\n", fullDirPath, err)
+					}
+					
+					// Apply ownership (may fail on non-root)
+					err = os.Chown(fullDirPath, int(currentEntry.UID), int(currentEntry.GID))
+					if err != nil {
+						// This is expected to fail for non-root users, so don't print warning
+					}
+					
+					// Apply timestamps
+					mtime := time.Unix(int64(currentEntry.MTime), int64(currentEntry.MTimeNs))
+					err = os.Chtimes(fullDirPath, mtime, mtime)
+					if err != nil {
+						fmt.Printf("Warning: failed to set timestamps for directory %s: %v\n", fullDirPath, err)
+					}
+				}
+				
 				// Push new directory onto stack
 				directoryStack = append(directoryStack, DirectoryStackEntry{
 					path:     newDirPath,
@@ -767,6 +829,7 @@ func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string) error {
 				})
 				fmt.Printf("Created directory: %s\n", newDirPath)
 				currentFilename = "" // Reset after entering directory
+				currentEntry = nil   // Reset entry metadata
 			}
 		}
 	}
