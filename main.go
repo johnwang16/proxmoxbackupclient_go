@@ -448,7 +448,6 @@ func main() {
 
 func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filename string, stream io.Reader, cryptConfig *CryptConfig, config *Config ) error {
 	var err error
-	var previouslyEncrypted bool
 	var previousDidx []byte
 	knownChunks := hashmap.New[string, bool]()
 	client.Connect(false)
@@ -589,7 +588,6 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 
 func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut string, backupdir string, cryptConfig *CryptConfig, config *Config) error {
 	var err error
-	var previouslyEncrypted bool
 	var previousDidx []byte
 	knownChunks := hashmap.New[string, bool]()
 
