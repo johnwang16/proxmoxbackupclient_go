@@ -40,6 +40,14 @@ type DynamicCloseReq struct {
 	WriterID   uint64 `json:"wid"`
 }
 
+type EncryptionMode int
+
+const (
+	EncryptionUnknown EncryptionMode = iota
+	EncryptionEnabled
+	EncryptionDisabled
+)
+
 type File struct {
 	CryptMode string `json:"crypt-mode"`
 	Csum      string `json:"csum"`
@@ -196,9 +204,6 @@ func (pbs *PBSClient) UploadUncompressedChunk(writerid uint64, digest string, ch
 	q.Add("wid", fmt.Sprintf("%d", writerid))
 
 	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_chunk?"+q.Encode(), bytes.NewBuffer(outBuffer))
-	if err != nil {
-		return err
-	}
 
 	resp2, err := pbs.client.Do(req)
 	if err != nil {
@@ -649,33 +654,37 @@ func (pbs *PBSClient) DownloadPreviousToBytes(archivename string) ([]byte, error
 
 }
 
-func (pbs *PBSClient) CheckPreviousEncryptionMode() (bool, error) {
+func (pbs *PBSClient) CheckPreviousEncryptionMode() EncryptionMode {
 	manifestData, err := pbs.DownloadPreviousToBytes("index.json.blob")
 	if err != nil {
 		fmt.Printf("Could not download previous manifest (this is normal for first backup): %v\n", err)
-		return false, nil // No previous backup, no conflict
+		return EncryptionUnknown // No previous backup
 	}
 
-	// Skip blob header (magic + crc32 = 12 bytes)
-	if len(manifestData) < 12 {
-		return false, fmt.Errorf("manifest data too short")
-	}
-	manifestJSON := manifestData[12:]
-
+	var manifestJSON []byte
 	var prevManifest BackupManifest
-	err = json.Unmarshal(manifestJSON, &prevManifest)
-	if err != nil {
-		return false, fmt.Errorf("failed to parse previous manifest: %v", err)
-	}
-
-	// Check if any file in previous backup was encrypted
-	for _, file := range prevManifest.Files {
-		if file.CryptMode == "encrypt" {
-			return true, nil
+	
+	// First try: parse as unencrypted manifest (skip 12-byte DataBlob header)
+	if len(manifestData) >= 12 {
+		manifestJSON = manifestData[12:]
+		err = json.Unmarshal(manifestJSON, &prevManifest)
+		if err == nil {
+			return EncryptionDisabled // Previous backup was unencrypted
 		}
 	}
-
-	return false, nil
+	
+	// Second try: decode as encrypted DataBlob (if we have encryption configured)
+	if pbs.cryptConfig != nil {
+		manifestJSON, err = DecodeDataBlob(manifestData, pbs.cryptConfig)
+		if err == nil {
+			err = json.Unmarshal(manifestJSON, &prevManifest)
+			if err == nil {
+				return EncryptionEnabled // Previous backup was encrypted
+			}
+		}
+	}
+	
+	return EncryptionUnknown // Could not parse manifest
 }
 
 func (pbs *PBSClient) DownloadChunk(digest string) ([]byte, error) {

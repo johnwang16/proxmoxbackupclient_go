@@ -498,28 +498,56 @@ func (a *PXARArchive) WriteFile(path string, basename string) CatalogFile {
 	}
 	readbuffer := make([]byte, bufferSize)
 
-	// Accumulate data in buffer before flushing to reduce I/O operations
-	flushThreshold := 16 * 1024 * 1024 // Default fallback
-	if a.perfConfig != nil {
-		flushThreshold = a.perfConfig.GetBufferSizes().PXARThreshold
-	}
+	// Track async processing for synchronization
+	readCount := 0
+	streamCount := 0
+	
+	// File processing started
+
+	// Create async pipeline channel with buffer depth for optimal overlap
+	pipelineDepth := 4 // Allow 4 buffers in pipeline
+	streamChan := make(chan []byte, pipelineDepth)
+	
+	// Start async streaming goroutine
+	go func() {
+		for data := range streamChan {
+			a.writeCB(data)
+			streamCount++
+		}
+	}()
+
 	for {
 		nread, err := file.Read(readbuffer)
+		
 		if nread <= 0 {
 			break
 		}
 		if err != nil {
 			panic(err.Error())
 		}
-		a.buffer.Write(readbuffer[:nread])
 		
-		// Only flush when buffer reaches threshold or at end of file
-		if a.buffer.Len() >= flushThreshold {
-			a.Flush()
-		}
+		// Track read count for async synchronization
+		readCount++
+		a.pos += uint64(nread)
+		
+		// Send data to async streaming pipeline (non-blocking with buffer)
+		// Make a copy since we're reusing readbuffer
+		data := make([]byte, nread)
+		copy(data, readbuffer[:nread])
+		streamChan <- data
+	}
+	
+	// Close channel and wait for streaming to complete
+	close(streamChan)
+	
+	// Give streaming goroutine time to finish processing
+	for streamCount < readCount {
+		time.Sleep(1 * time.Millisecond)
 	}
 
-	a.Flush()
+	// File processing complete
+
+	// No flush needed - data was streamed asynchronously
 
 	return CatalogFile{
 		Name:  basename,

@@ -71,6 +71,9 @@ type ParallelChunkState struct {
 
 	// Current chunk tracking for streaming data
 	currentChunkIndex int64
+
+	// Memory pool for efficient chunk buffer reuse
+	bufferPool sync.Pool
 }
 
 
@@ -106,22 +109,30 @@ func (c *ParallelChunkState) InitWithConfig(newchunk *atomic.Uint64, reusechunk 
 		c.perfConfig = &defaultConfig
 	}
 	
-	c.numWorkers = c.perfConfig.WorkerCount
+	c.numWorkers = c.perfConfig.GetWorkerCount()
 	c.pendingResults = make(map[int64]ChunkProcessResult)
 	c.nextChunkIndex = 0
 	c.currentChunkIndex = 0
+
+	// Initialize buffer pool for efficient memory reuse
+	c.bufferPool = sync.Pool{
+		New: func() interface{} {
+			// Pre-allocate buffers slightly larger than average chunk size
+			// This reduces allocations for most chunks
+			return make([]byte, 0, 8*1024*1024) // 8MB capacity
+		},
+	}
 }
 
 // StartParallel starts the parallel processing pipeline
 func (c *ParallelChunkState) StartParallel(client *PBSClient) {
 	c.client = client
 
-	// Create channels with configurable buffer sizes for better pipelining
-	// This allows more chunks to be queued, reducing blocking on I/O
-	queueDepth := c.perfConfig.ChunkQueueDepth
-	c.processQueue = make(chan ChunkProcessJob, queueDepth)
-	c.processResult = make(chan ChunkProcessResult, queueDepth)
-	c.uploadQueue = make(chan ChunkProcessResult, queueDepth)
+	// Create unbuffered channels - workers provide the parallelism, not queue depth
+	// Buzhash is sequential anyway, so buffering doesn't help
+	c.processQueue = make(chan ChunkProcessJob)
+	c.processResult = make(chan ChunkProcessResult)
+	c.uploadQueue = make(chan ChunkProcessResult)
 
 	// Start worker goroutines for chunk processing
 	for i := 0; i < c.numWorkers; i++ {
@@ -138,7 +149,7 @@ func (c *ParallelChunkState) StartParallel(client *PBSClient) {
 	go c.uploadWorker()
 
 	if c.config != nil && c.config.ShouldLogPerformance() {
-		fmt.Printf("Started parallel processing with %d workers\n", c.numWorkers)
+		fmt.Printf("Started chunk processing with %d workers\n", c.numWorkers)
 	}
 }
 
@@ -147,17 +158,14 @@ func (c *ParallelChunkState) processWorker() {
 	defer c.workerWg.Done()
 
 	for job := range c.processQueue {
-		// First check if chunk already exists (lock-free read check)
-		// The cornelk/hashmap is concurrent-safe for reads, no mutex needed!
-		// This is an optimization to skip processing known chunks
-		preliminaryDigest := c.computePreliminaryDigest(job.chunkData)
+		// Compute hash once and use for both dedup check and final result
+		bindigest, shahash := c.computeChunkDigestThreadSafe(job.chunkData, c.cryptConfig)
 		
 		// Lock-free read from concurrent hashmap - this is the key performance fix!
-		_, exists := c.knownChunks.Get(preliminaryDigest)
+		_, exists := c.knownChunks.Get(shahash)
 
 		if exists {
-			// Skip processing for known chunks but still compute digest for DIDX
-			bindigest, shahash := c.computeChunkDigestThreadSafe(job.chunkData, c.cryptConfig)
+			// Skip processing for known chunks - hash already computed above
 			result := ChunkProcessResult{
 				chunkIndex:   job.chunkIndex,
 				shahash:      shahash,
@@ -168,6 +176,9 @@ func (c *ParallelChunkState) processWorker() {
 				chunkData:    nil, // No need to process/upload
 			}
 			c.processResult <- result
+			
+			// Return buffer to pool for reuse (known chunk case)
+			c.bufferPool.Put(job.chunkData[:0]) // Reset length but keep capacity
 			continue
 		}
 
@@ -179,8 +190,6 @@ func (c *ParallelChunkState) processWorker() {
 		}
 
 		chunkData := job.chunkData
-		var bindigest []byte
-		var shahash string
 
 		if c.cryptConfig != nil {
 			var err error
@@ -191,11 +200,6 @@ func (c *ParallelChunkState) processWorker() {
 				c.processResult <- result
 				continue
 			}
-			// Calculate digest on original data (PBS spec)
-			bindigest, shahash = c.computeChunkDigestThreadSafe(job.chunkData, c.cryptConfig)
-		} else {
-			// Unencrypted chunks
-			bindigest, shahash = c.computeChunkDigestThreadSafe(job.chunkData, nil)
 		}
 
 		result.chunkData = chunkData
@@ -206,20 +210,9 @@ func (c *ParallelChunkState) processWorker() {
 		result.isNew = true
 
 		c.processResult <- result
-	}
-}
-
-// computePreliminaryDigest computes a quick digest for dedup checking
-func (c *ParallelChunkState) computePreliminaryDigest(data []byte) string {
-	if c.cryptConfig != nil {
-		// For encrypted chunks: hash plaintext + encryption key
-		digest := c.cryptConfig.ComputeDigest(data)
-		return hex.EncodeToString(digest[:])
-	} else {
-		// For unencrypted chunks: hash plaintext only
-		h := sha256.New()
-		h.Write(data)
-		return hex.EncodeToString(h.Sum(nil))
+		
+		// Return buffer to pool for reuse
+		c.bufferPool.Put(job.chunkData[:0]) // Reset length but keep capacity
 	}
 }
 
@@ -370,13 +363,21 @@ func (c *ParallelChunkState) HandleData(b []byte) {
 			// Append data until break position
 			c.current_chunk = append(c.current_chunk, b[:chunkpos]...)
 
-			// Submit chunk for parallel processing
+			// Submit chunk for parallel processing using pooled buffer
+			pooledBuffer := c.bufferPool.Get().([]byte)
+			// Ensure buffer has enough capacity, grow if needed
+			if cap(pooledBuffer) < len(c.current_chunk) {
+				pooledBuffer = make([]byte, 0, len(c.current_chunk))
+			}
+			// Reset length and copy data
+			pooledBuffer = pooledBuffer[:len(c.current_chunk)]
+			copy(pooledBuffer, c.current_chunk)
+			
 			job := ChunkProcessJob{
-				chunkData:  make([]byte, len(c.current_chunk)),
+				chunkData:  pooledBuffer,
 				chunkIndex: c.currentChunkIndex,
 				offset:     c.pos,
 			}
-			copy(job.chunkData, c.current_chunk)
 
 			c.processQueue <- job
 
@@ -395,14 +396,22 @@ func (c *ParallelChunkState) HandleData(b []byte) {
 
 // Eof processes the final chunk and closes the pipeline
 func (c *ParallelChunkState) Eof() {
-	// Process any remaining data
+	// Process any remaining data using pooled buffer
 	if len(c.current_chunk) > 0 {
+		pooledBuffer := c.bufferPool.Get().([]byte)
+		// Ensure buffer has enough capacity, grow if needed
+		if cap(pooledBuffer) < len(c.current_chunk) {
+			pooledBuffer = make([]byte, 0, len(c.current_chunk))
+		}
+		// Reset length and copy data
+		pooledBuffer = pooledBuffer[:len(c.current_chunk)]
+		copy(pooledBuffer, c.current_chunk)
+		
 		job := ChunkProcessJob{
-			chunkData:  make([]byte, len(c.current_chunk)),
+			chunkData:  pooledBuffer,
 			chunkIndex: c.currentChunkIndex,
 			offset:     c.pos,
 		}
-		copy(job.chunkData, c.current_chunk)
 		c.processQueue <- job
 		c.pos += uint64(len(c.current_chunk))
 		c.currentChunkIndex++

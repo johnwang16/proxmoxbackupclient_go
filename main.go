@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,6 +31,8 @@ Chunks New {{.NewChunks}}, Reused {{.ReusedChunks}}.{{else}}Error occurred while
 Last error is: {{.ErrorStr}}{{end}}`
 
 var didxMagic = []byte{28, 145, 78, 165, 25, 186, 179, 205}
+
+const DIDX_ENTRY_SIZE = 40 // 8 bytes offset + 32 bytes SHA256 digest
 
 type ChunkState struct {
 	assignments        []string
@@ -226,6 +229,11 @@ func main() {
 
 	cfg, isRestore := loadConfig()
 	cfg.InitializeLogLevel()
+	
+	// Show worker count for all parallel operations
+	if cfg.Performance != nil {
+		fmt.Printf("Using %d workers for parallel processing\n", cfg.Performance.GetWorkerCount())
+	}
 
 	var cryptConfig *CryptConfig
 	if cfg.EncryptionKeyPath != "" {
@@ -450,12 +458,16 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 	// Auto-detect encryption mode mismatch
 	if !forceFullBackup {
 		currentlyEncrypted := (cryptConfig != nil)
-		previouslyEncrypted, err = client.CheckPreviousEncryptionMode()
-		if err != nil {
-			fmt.Printf("Warning: Could not check previous encryption mode: %v\n", err)
-		} else if currentlyEncrypted != previouslyEncrypted {
-			fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
+		previousEncryptionMode := client.CheckPreviousEncryptionMode()
+		if previousEncryptionMode == EncryptionUnknown {
+			fmt.Printf("Error: Could not parse previous manifest, forcing full backup\n")
 			forceFullBackup = true
+		} else {
+			previouslyEncrypted := (previousEncryptionMode == EncryptionEnabled)
+			if currentlyEncrypted != previouslyEncrypted {
+				fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
+				forceFullBackup = true
+			}
 		}
 	}
 	
@@ -479,15 +491,48 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 			//Header as per proxmox documentation is fixed size of 4096 bytes,
 			//then offset of type uint64 and sha256 digests follow , so 40 byte each record until EOF
 			previousDidx = previousDidx[4096:]
-			for i := 0; i*40 < len(previousDidx); i += 1 {
-				e := DidxEntry{}
-				e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
-				e.digest = previousDidx[i*40+8 : i*40+40]
-				shahash := hex.EncodeToString(e.digest)
-				if config.ShouldLogDebug() {
-					fmt.Printf("Previous: %s\n", shahash)
+			
+			// Parallel DIDX parsing for faster startup on large backups
+			numChunks := len(previousDidx) / DIDX_ENTRY_SIZE
+			if numChunks > 0 {
+				fmt.Printf("Parsing %d chunks from previous backup index...\n", numChunks)
+				
+				// Use worker pool for parallel parsing from performance config
+				numWorkers := config.Performance.GetWorkerCount()
+				
+				chunkSize := (numChunks + numWorkers - 1) / numWorkers // Divide work evenly
+				var wg sync.WaitGroup
+				
+				parseStart := time.Now()
+				for w := 0; w < numWorkers; w++ {
+					start := w * chunkSize
+					end := (w + 1) * chunkSize
+					if end > numChunks {
+						end = numChunks
+					}
+					
+					wg.Add(1)
+					go func(startIdx, endIdx int) {
+						defer wg.Done()
+						
+						for i := startIdx; i < endIdx; i++ {
+							e := DidxEntry{}
+							e.offset = binary.LittleEndian.Uint64(previousDidx[i*DIDX_ENTRY_SIZE : i*DIDX_ENTRY_SIZE+8])
+							e.digest = previousDidx[i*DIDX_ENTRY_SIZE+8 : i*DIDX_ENTRY_SIZE+DIDX_ENTRY_SIZE]
+							shahash := hex.EncodeToString(e.digest)
+							// Skip debug logging in parallel mode - too much contention on stdout
+							knownChunks.Set(shahash, true)
+						}
+					}(start, end)
 				}
-				knownChunks.Set(shahash, true)
+				
+				wg.Wait()
+				
+				if config.ShouldLogPerformance() {
+					parseDuration := time.Since(parseStart)
+					fmt.Printf("Parsed %d previous chunks in %v using %d workers\n", 
+						numChunks, parseDuration, numWorkers)
+				}
 			}
 		}
 	} else {
@@ -511,16 +556,22 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 	// Use configurable buffer for I/O throughput
 	bufferSizes := config.Performance.GetBufferSizes()
 	B := make([]byte, bufferSizes.StreamReadBuffer)
+	
+	// Stream backup processing
+	
 	for {
 		
 		n, err := stream.Read(B)
 		
-		b := B[:n]
-		
-		streamChunk.HandleData(b)
+		if n > 0 {
+			streamChunk.HandleData(B[:n])
+		}
 
 		if err == io.EOF {
 			break
+		}
+		if err != nil {
+			return err
 		}
 	}
 
@@ -559,12 +610,16 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	// Auto-detect encryption mode mismatch
 	if !forceFullBackup {
 		currentlyEncrypted := (cryptConfig != nil)
-		previouslyEncrypted, err = client.CheckPreviousEncryptionMode()
-		if err != nil {
-			fmt.Printf("Warning: Could not check previous encryption mode: %v\n", err)
-		} else if currentlyEncrypted != previouslyEncrypted {
-			fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
+		previousEncryptionMode := client.CheckPreviousEncryptionMode()
+		if previousEncryptionMode == EncryptionUnknown {
+			fmt.Printf("Error: Could not parse previous manifest, forcing full backup\n")
 			forceFullBackup = true
+		} else {
+			previouslyEncrypted := (previousEncryptionMode == EncryptionEnabled)
+			if currentlyEncrypted != previouslyEncrypted {
+				fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
+				forceFullBackup = true
+			}
 		}
 	}
 
@@ -591,15 +646,48 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 			//Header as per proxmox documentation is fixed size of 4096 bytes,
 			//then offset of type uint64 and sha256 digests follow , so 40 byte each record until EOF
 			previousDidx = previousDidx[4096:]
-			for i := 0; i*40 < len(previousDidx); i += 1 {
-				e := DidxEntry{}
-				e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
-				e.digest = previousDidx[i*40+8 : i*40+40]
-				shahash := hex.EncodeToString(e.digest)
-				if config.ShouldLogDebug() {
-					fmt.Printf("Previous: %s\n", shahash)
+			
+			// Parallel DIDX parsing for faster startup
+			numChunks := len(previousDidx) / DIDX_ENTRY_SIZE
+			if numChunks > 0 {
+				fmt.Printf("Parsing %d chunks from previous backup index...\n", numChunks)
+				
+				// Use worker pool for parallel parsing from performance config
+				numWorkers := config.Performance.GetWorkerCount()
+				
+				chunkSize := (numChunks + numWorkers - 1) / numWorkers // Divide work evenly
+				var wg sync.WaitGroup
+				
+				parseStart := time.Now()
+				for w := 0; w < numWorkers; w++ {
+					start := w * chunkSize
+					end := (w + 1) * chunkSize
+					if end > numChunks {
+						end = numChunks
+					}
+					
+					wg.Add(1)
+					go func(startIdx, endIdx int) {
+						defer wg.Done()
+						
+						for i := startIdx; i < endIdx; i++ {
+							e := DidxEntry{}
+							e.offset = binary.LittleEndian.Uint64(previousDidx[i*DIDX_ENTRY_SIZE : i*DIDX_ENTRY_SIZE+8])
+							e.digest = previousDidx[i*DIDX_ENTRY_SIZE+8 : i*DIDX_ENTRY_SIZE+DIDX_ENTRY_SIZE]
+							shahash := hex.EncodeToString(e.digest)
+							// Skip debug logging in parallel mode - too much contention on stdout
+							knownChunks.Set(shahash, true)
+						}
+					}(start, end)
 				}
-				knownChunks.Set(shahash, true)
+				
+				wg.Wait()
+				
+				if config.ShouldLogPerformance() {
+					parseDuration := time.Since(parseStart)
+					fmt.Printf("Parsed %d previous chunks in %v using %d workers\n", 
+						numChunks, parseDuration, numWorkers)
+				}
 			}
 		}
 	} else {

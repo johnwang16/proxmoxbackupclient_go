@@ -123,8 +123,6 @@ func loadConfig() (*Config, bool) {
 	fileReadBufferFlag := flag.Int("file-read-buffer-mb", 0, "File read buffer size in MB (0=auto) (optional)")
 	streamReadBufferFlag := flag.Int("stream-read-buffer-mb", 0, "Stream read buffer size in MB (0=auto) (optional)")
 	workerCountFlag := flag.Int("worker-count", 0, "Number of parallel workers (0=auto) (optional)")
-	highPerformanceFlag := flag.Bool("high-performance", false, "Use high-performance settings for fast systems (optional)")
-	lowMemoryFlag := flag.Bool("low-memory", false, "Use low-memory settings for resource-constrained systems (optional)")
 
 	// Restore flags
 	restoreModeFlag := flag.Bool("restore", false, "Enable restore mode instead of backup mode")
@@ -250,16 +248,8 @@ func loadConfig() (*Config, bool) {
 	
 	// Initialize performance configuration
 	if config.Performance == nil {
-		if *highPerformanceFlag {
-			perfConfig := HighPerformanceConfig()
-			config.Performance = &perfConfig
-		} else if *lowMemoryFlag {
-			perfConfig := LowMemoryConfig()
-			config.Performance = &perfConfig
-		} else {
-			perfConfig := DefaultPerformanceConfig()
-			config.Performance = &perfConfig
-		}
+		perfConfig := DefaultPerformanceConfig()
+		config.Performance = &perfConfig
 	}
 	
 	// Override performance settings from command line flags

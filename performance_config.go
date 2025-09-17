@@ -15,7 +15,6 @@ type PerformanceConfig struct {
 	
 	// Parallel processing configuration
 	WorkerCount         int `json:"worker-count"`            // Number of parallel workers (0 = auto)
-	ChunkQueueDepth     int `json:"chunk-queue-depth"`       // Depth of chunk processing queues
 	
 	// Chunking configuration
 	ChunkSizeMB         int `json:"chunk-size-mb"`           // Average chunk size for deduplication
@@ -26,11 +25,7 @@ type PerformanceConfig struct {
 
 // DefaultPerformanceConfig returns sensible defaults based on system capabilities
 func DefaultPerformanceConfig() PerformanceConfig {
-	// Auto-detect optimal settings based on available memory and CPU
-	workers := runtime.NumCPU()
-	if workers > 8 {
-		workers = 8 // Cap at 8 workers to avoid excessive memory usage
-	}
+	// Auto-detect optimal settings will happen in GetWorkerCount() if WorkerCount is 0
 	
 	return PerformanceConfig{
 		// I/O Buffer sizes - balance between memory usage and throughput
@@ -40,8 +35,7 @@ func DefaultPerformanceConfig() PerformanceConfig {
 		PXARThresholdMB:      16,  // Flush when buffer reaches 16MB
 		
 		// Parallel processing
-		WorkerCount:         workers,        // Use all available cores (capped)
-		ChunkQueueDepth:     workers * 8,    // Deep queues for better pipelining
+		WorkerCount:         0,              // 0 = auto-detect (will use CPU count, capped at 8)
 		
 		// Chunking
 		ChunkSizeMB:         4,   // 4MB average chunk size (PBS default)
@@ -51,36 +45,20 @@ func DefaultPerformanceConfig() PerformanceConfig {
 	}
 }
 
-// HighPerformanceConfig returns settings optimized for high-end systems with fast SSDs
-func HighPerformanceConfig() PerformanceConfig {
-	config := DefaultPerformanceConfig()
-	
-	// Increase buffer sizes for maximum throughput
-	config.FileReadBufferMB = 32     // 32MB buffers for very fast SSDs
-	config.StreamReadBufferMB = 32
-	config.PXARFlushBufferMB = 32
-	config.PXARThresholdMB = 64      // Larger threshold for fewer flushes
-	config.ChunkQueueDepth *= 2     // Even deeper queues
-	
-	return config
-}
 
-// LowMemoryConfig returns settings optimized for systems with limited RAM
-func LowMemoryConfig() PerformanceConfig {
-	config := DefaultPerformanceConfig()
-	
-	// Reduce buffer sizes to conserve memory
-	config.FileReadBufferMB = 2      // 2MB buffers
-	config.StreamReadBufferMB = 2
-	config.PXARFlushBufferMB = 2
-	config.PXARThresholdMB = 4       // Flush more frequently
-	config.ChunkQueueDepth /= 2      // Shallower queues
-	config.WorkerCount /= 2          // Fewer workers
-	if config.WorkerCount < 1 {
-		config.WorkerCount = 1
+
+// GetWorkerCount returns the effective worker count, auto-detecting if needed
+func (p *PerformanceConfig) GetWorkerCount() int {
+	if p.WorkerCount > 0 {
+		return p.WorkerCount
 	}
 	
-	return config
+	// Auto-detect based on logical cores, using half as default
+	workers := runtime.NumCPU() / 2
+	if workers < 1 {
+		workers = 1 // Ensure at least 1 worker
+	}
+	return workers
 }
 
 // GetBufferSizes returns buffer sizes in bytes for easy use
@@ -108,7 +86,6 @@ func (p *PerformanceConfig) GetOptimizationSummary() string {
 	summary += fmt.Sprintf("  - Lock-free concurrent deduplication\n")
 	summary += fmt.Sprintf("  - Optimized I/O buffers: %dMB read, %dMB PXAR flush\n", 
 		p.FileReadBufferMB, p.PXARFlushBufferMB)
-	summary += fmt.Sprintf("  - Deep processing queues: %d chunk capacity\n", p.ChunkQueueDepth)
 	summary += fmt.Sprintf("  - Sequential upload pipeline for race-free operation")
 	
 	return summary
@@ -129,11 +106,8 @@ func (p *PerformanceConfig) ValidateConfig() {
 	if p.PXARThresholdMB < p.PXARFlushBufferMB {
 		p.PXARThresholdMB = p.PXARFlushBufferMB * 2
 	}
-	if p.WorkerCount < 1 {
-		p.WorkerCount = 1
-	}
-	if p.ChunkQueueDepth < 1 {
-		p.ChunkQueueDepth = 8
+	if p.WorkerCount < 0 {
+		p.WorkerCount = 0  // 0 means auto-detect
 	}
 	if p.ChunkSizeMB < 1 {
 		p.ChunkSizeMB = 4
