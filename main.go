@@ -89,6 +89,7 @@ func (c *ChunkState) computeChunkDigest(data []byte) ([]byte, string) {
 }
 
 func (c *ChunkState) HandleData(b []byte, client *PBSClient){
+	// Use standard chunking algorithm
 	chunkpos := c.C.Scan(b)
 
 	if chunkpos == 0 {
@@ -224,6 +225,7 @@ func main() {
 	var reusechunk *atomic.Uint64 = new(atomic.Uint64)
 
 	cfg, isRestore := loadConfig()
+	cfg.InitializeLogLevel()
 
 	var cryptConfig *CryptConfig
 	if cfg.EncryptionKeyPath != "" {
@@ -482,7 +484,7 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 				e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
 				e.digest = previousDidx[i*40+8 : i*40+40]
 				shahash := hex.EncodeToString(e.digest)
-				if config.Debug {
+				if config.ShouldLogDebug() {
 					fmt.Printf("Previous: %s\n", shahash)
 				}
 				knownChunks.Set(shahash, true)
@@ -496,7 +498,7 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 
 	// Use parallel processing for stream backups
 	streamChunk := &ParallelChunkState{}
-	streamChunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config.Debug, config.Performance)
+	streamChunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config)
 
 	streamChunk.wrid, err = client.CreateDynamicIndex(filename)
 	if err != nil {
@@ -594,7 +596,7 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 				e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
 				e.digest = previousDidx[i*40+8 : i*40+40]
 				shahash := hex.EncodeToString(e.digest)
-				if config.Debug {
+				if config.ShouldLogDebug() {
 					fmt.Printf("Previous: %s\n", shahash)
 				}
 				knownChunks.Set(shahash, true)
@@ -617,10 +619,10 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 
 	// Use parallel processing for PXAR backups
 	pxarChunk := &ParallelChunkState{}
-	pxarChunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config.Debug, config.Performance)
+	pxarChunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config)
 
 	pcat1Chunk := &ParallelChunkState{}
-	pcat1Chunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config.Debug, config.Performance)
+	pcat1Chunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config)
 
 	pxarChunk.wrid, err = client.CreateDynamicIndex(archive.archivename)
 	if err != nil {

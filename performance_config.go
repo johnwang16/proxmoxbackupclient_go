@@ -1,6 +1,9 @@
 package main
 
-import "runtime"
+import (
+	"fmt"
+	"runtime"
+)
 
 // PerformanceConfig contains all performance-related configuration options
 type PerformanceConfig struct {
@@ -57,7 +60,7 @@ func HighPerformanceConfig() PerformanceConfig {
 	config.StreamReadBufferMB = 32
 	config.PXARFlushBufferMB = 32
 	config.PXARThresholdMB = 64      // Larger threshold for fewer flushes
-	config.ChunkQueueDepth *= 2      // Even deeper queues
+	config.ChunkQueueDepth *= 2     // Even deeper queues
 	
 	return config
 }
@@ -98,6 +101,19 @@ type BufferSizes struct {
 	PXARThreshold    int
 }
 
+// GetOptimizationSummary returns a summary of active performance optimizations
+func (p *PerformanceConfig) GetOptimizationSummary() string {
+	summary := fmt.Sprintf("Performance optimizations active:\n")
+	summary += fmt.Sprintf("  - %d parallel workers for chunk processing\n", p.WorkerCount)
+	summary += fmt.Sprintf("  - Lock-free concurrent deduplication\n")
+	summary += fmt.Sprintf("  - Optimized I/O buffers: %dMB read, %dMB PXAR flush\n", 
+		p.FileReadBufferMB, p.PXARFlushBufferMB)
+	summary += fmt.Sprintf("  - Deep processing queues: %d chunk capacity\n", p.ChunkQueueDepth)
+	summary += fmt.Sprintf("  - Sequential upload pipeline for race-free operation")
+	
+	return summary
+}
+
 // ValidateConfig ensures configuration values are reasonable
 func (p *PerformanceConfig) ValidateConfig() {
 	// Ensure minimum values
@@ -127,7 +143,7 @@ func (p *PerformanceConfig) ValidateConfig() {
 	estimatedMemoryMB := p.FileReadBufferMB + p.StreamReadBufferMB + p.PXARFlushBufferMB + 
 		(p.WorkerCount * p.ChunkSizeMB * 2) // Rough estimate for worker buffers
 	
-	if estimatedMemoryMB > 1024 { // More than 1GB
+	if estimatedMemoryMB > 2048 { // More than 2GB (increased for high-performance mode)
 		// Could add logging here if we had a logger
 		// fmt.Printf("Warning: High memory usage estimated: ~%dMB\n", estimatedMemoryMB)
 	}

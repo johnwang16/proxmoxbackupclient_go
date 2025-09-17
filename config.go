@@ -42,7 +42,7 @@ type Config struct {
 	EncryptionPassword   string      `json:"encryption-password"`
 	MasterKeyPath        string      `json:"master-key-path"`
 	ForceFullBackup      bool        `json:"force-full-backup"`
-	Debug                bool               `json:"debug"`
+	LogLevel             string             `json:"log-level"`
 	Performance          *PerformanceConfig `json:"performance"`
 	SMTP                 *SMTPConfig        `json:"smtp"`
 	
@@ -117,7 +117,7 @@ func loadConfig() (*Config, bool) {
 	encryptionPasswordFlag := flag.String("encryption-password", "", "Password for encrypted key file (optional)")
 	masterKeyPathFlag := flag.String("master-key-path", "", "Path to RSA master key for key recovery (optional)")
 	forceFullBackupFlag := flag.Bool("force-full-backup", false, "Force a full backup, ignoring previous backup for incremental deduplication (optional)")
-	debugFlag := flag.Bool("debug", false, "Enable debug output for chunk processing (optional)")
+	logLevelFlag := flag.String("log-level", "info", "Log level: info, performance, debug (default: info)")
 	
 	// Performance tuning flags
 	fileReadBufferFlag := flag.Int("file-read-buffer-mb", 0, "File read buffer size in MB (0=auto) (optional)")
@@ -244,8 +244,8 @@ func loadConfig() (*Config, bool) {
 	if *forceFullBackupFlag {
 		config.ForceFullBackup = *forceFullBackupFlag
 	}
-	if *debugFlag {
-		config.Debug = *debugFlag
+	if *logLevelFlag != "" {
+		config.LogLevel = *logLevelFlag
 	}
 	
 	// Initialize performance configuration

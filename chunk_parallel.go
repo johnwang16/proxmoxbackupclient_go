@@ -49,7 +49,7 @@ type ParallelChunkState struct {
 	reusechunk         *atomic.Uint64
 	knownChunks        *hashmap.Map[string, bool]
 	cryptConfig        *CryptConfig
-	debug              bool
+	config             *Config
 	perfConfig         *PerformanceConfig
 
 	// Parallel processing channels and state
@@ -73,18 +73,9 @@ type ParallelChunkState struct {
 	currentChunkIndex int64
 }
 
-// Init initializes the parallel chunk state
-func (c *ParallelChunkState) Init(newchunk *atomic.Uint64, reusechunk *atomic.Uint64, knownChunks *hashmap.Map[string, bool], cryptConfig *CryptConfig) {
-	c.InitWithDebug(newchunk, reusechunk, knownChunks, cryptConfig, false)
-}
-
-// InitWithDebug initializes the parallel chunk state with debug flag
-func (c *ParallelChunkState) InitWithDebug(newchunk *atomic.Uint64, reusechunk *atomic.Uint64, knownChunks *hashmap.Map[string, bool], cryptConfig *CryptConfig, debug bool) {
-	c.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, debug, nil)
-}
 
 // InitWithConfig initializes the parallel chunk state with full configuration
-func (c *ParallelChunkState) InitWithConfig(newchunk *atomic.Uint64, reusechunk *atomic.Uint64, knownChunks *hashmap.Map[string, bool], cryptConfig *CryptConfig, debug bool, perfConfig *PerformanceConfig) {
+func (c *ParallelChunkState) InitWithConfig(newchunk *atomic.Uint64, reusechunk *atomic.Uint64, knownChunks *hashmap.Map[string, bool], cryptConfig *CryptConfig, config *Config) {
 	c.assignments = make([]string, 0)
 	c.assignments_offset = make([]uint64, 0)
 	c.pos = 0
@@ -92,6 +83,7 @@ func (c *ParallelChunkState) InitWithConfig(newchunk *atomic.Uint64, reusechunk 
 	c.chunkdigests = sha256.New()
 	c.current_chunk = make([]byte, 0)
 	c.cryptConfig = cryptConfig
+	c.config = config
 
 	chunkAvgSize := uint64(1024 * 1024 * 4) // 4MB average
 	if cryptConfig != nil {
@@ -106,19 +98,18 @@ func (c *ParallelChunkState) InitWithConfig(newchunk *atomic.Uint64, reusechunk 
 	c.knownChunks = knownChunks
 
 	// Initialize parallel processing state
-	// Set performance configuration
-	if perfConfig == nil {
+	// Set performance configuration from main config
+	if config != nil && config.Performance != nil {
+		c.perfConfig = config.Performance
+	} else {
 		defaultConfig := DefaultPerformanceConfig()
 		c.perfConfig = &defaultConfig
-	} else {
-		c.perfConfig = perfConfig
 	}
 	
 	c.numWorkers = c.perfConfig.WorkerCount
 	c.pendingResults = make(map[int64]ChunkProcessResult)
 	c.nextChunkIndex = 0
 	c.currentChunkIndex = 0
-	c.debug = debug
 }
 
 // StartParallel starts the parallel processing pipeline
@@ -146,7 +137,7 @@ func (c *ParallelChunkState) StartParallel(client *PBSClient) {
 	c.uploadWg.Add(1)
 	go c.uploadWorker()
 
-	if c.debug {
+	if c.config != nil && c.config.ShouldLogPerformance() {
 		fmt.Printf("Started parallel processing with %d workers\n", c.numWorkers)
 	}
 }
@@ -325,7 +316,7 @@ func (c *ParallelChunkState) uploadWorker() {
 			_, alreadyExists := c.knownChunks.GetOrInsert(result.shahash, true)
 
 			if !alreadyExists {
-				if c.debug {
+				if c.config != nil && c.config.ShouldLogDebug() {
 					fmt.Printf("New chunk[%s] %d bytes\n", result.shahash, len(result.chunkData))
 				}
 
@@ -342,7 +333,7 @@ func (c *ParallelChunkState) uploadWorker() {
 					if strings.Contains(err.Error(), "Overwriting existing") || 
 					   strings.Contains(err.Error(), "already exists") ||
 					   strings.Contains(err.Error(), "already exist") {
-						if c.debug {
+						if c.config != nil && c.config.ShouldLogDebug() {
 							fmt.Printf("Chunk already exists on server (race recovery): %s\n", result.shahash)
 						}
 						c.reusechunk.Add(1)
@@ -353,13 +344,13 @@ func (c *ParallelChunkState) uploadWorker() {
 					c.newchunk.Add(1)
 				}
 			} else {
-				if c.debug {
+				if c.config != nil && c.config.ShouldLogDebug() {
 					fmt.Printf("Reuse chunk[%s] %d bytes (detected at upload)\n", result.shahash, result.originalSize)
 				}
 				c.reusechunk.Add(1)
 			}
 		} else {
-			if c.debug {
+			if c.config != nil && c.config.ShouldLogDebug() {
 				fmt.Printf("Reuse chunk[%s] %d bytes\n", result.shahash, result.originalSize)
 			}
 			c.reusechunk.Add(1)
