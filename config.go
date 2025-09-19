@@ -41,7 +41,6 @@ type Config struct {
 	EncryptionKeyPath    string      `json:"encryption-key-path"`
 	EncryptionPassword   string      `json:"encryption-password"`
 	MasterKeyPath        string      `json:"master-key-path"`
-	ForceFullBackup      bool        `json:"force-full-backup"`
 	LogLevel             string             `json:"log-level"`
 	Performance          *PerformanceConfig `json:"performance"`
 	SMTP                 *SMTPConfig        `json:"smtp"`
@@ -116,7 +115,6 @@ func loadConfig() (*Config, bool, string) {
 	encryptionKeyPathFlag := flag.String("encryption-key-path", "", "Path to encryption key file (optional)")
 	encryptionPasswordFlag := flag.String("encryption-password", "", "Password for encrypted key file (optional)")
 	masterKeyPathFlag := flag.String("master-key-path", "", "Path to RSA master key for key recovery (optional)")
-	forceFullBackupFlag := flag.Bool("force-full-backup", false, "Force a full backup, ignoring previous backup for incremental deduplication (optional)")
 	logLevelFlag := flag.String("log-level", "info", "Log level: info, performance, debug (default: info)")
 	
 	// Performance tuning flags
@@ -239,9 +237,6 @@ func loadConfig() (*Config, bool, string) {
 	}
 	if *masterKeyPathFlag != "" {
 		config.MasterKeyPath = *masterKeyPathFlag
-	}
-	if *forceFullBackupFlag {
-		config.ForceFullBackup = *forceFullBackupFlag
 	}
 	if *logLevelFlag != "" {
 		config.LogLevel = *logLevelFlag

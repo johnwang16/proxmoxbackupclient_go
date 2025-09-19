@@ -451,25 +451,23 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 	var previousDidx []byte
 	knownChunks := hashmap.New[string, bool]()
 	client.Connect(false)
-	
-	forceFullBackup := config.ForceFullBackup
-	
+
+	forceFullBackup := false
+
 	// Auto-detect encryption mode mismatch
-	if !forceFullBackup {
-		currentlyEncrypted := (cryptConfig != nil)
-		previousEncryptionMode := client.CheckPreviousEncryptionMode()
-		if previousEncryptionMode == EncryptionUnknown {
-			fmt.Printf("Error: Could not parse previous manifest, forcing full backup\n")
+	currentlyEncrypted := (cryptConfig != nil)
+	previousEncryptionMode := client.CheckPreviousEncryptionMode()
+	if previousEncryptionMode == EncryptionUnknown {
+		fmt.Printf("Error: Could not parse previous manifest, forcing full backup\n")
+		forceFullBackup = true
+	} else {
+		previouslyEncrypted := (previousEncryptionMode == EncryptionEnabled)
+		if currentlyEncrypted != previouslyEncrypted {
+			fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
 			forceFullBackup = true
-		} else {
-			previouslyEncrypted := (previousEncryptionMode == EncryptionEnabled)
-			if currentlyEncrypted != previouslyEncrypted {
-				fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
-				forceFullBackup = true
-			}
 		}
 	}
-	
+
 	if !forceFullBackup {
 		previousDidx, err = client.DownloadPreviousToBytes(filename)
 		if err != nil {
@@ -479,7 +477,7 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 		}
 
 	}
-	
+
 	if !forceFullBackup && len(previousDidx) > 0 {
 		fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
 
@@ -603,21 +601,19 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	archive.archivename = "backup.pxar.didx"
 	archive.perfConfig = config.Performance
 
-	forceFullBackup := config.ForceFullBackup
-	
+	forceFullBackup := false
+
 	// Auto-detect encryption mode mismatch
-	if !forceFullBackup {
-		currentlyEncrypted := (cryptConfig != nil)
-		previousEncryptionMode := client.CheckPreviousEncryptionMode()
-		if previousEncryptionMode == EncryptionUnknown {
-			fmt.Printf("Error: Could not parse previous manifest, forcing full backup\n")
+	currentlyEncrypted := (cryptConfig != nil)
+	previousEncryptionMode := client.CheckPreviousEncryptionMode()
+	if previousEncryptionMode == EncryptionUnknown {
+		fmt.Printf("Error: Could not parse previous manifest, forcing full backup\n")
+		forceFullBackup = true
+	} else {
+		previouslyEncrypted := (previousEncryptionMode == EncryptionEnabled)
+		if currentlyEncrypted != previouslyEncrypted {
+			fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
 			forceFullBackup = true
-		} else {
-			previouslyEncrypted := (previousEncryptionMode == EncryptionEnabled)
-			if currentlyEncrypted != previouslyEncrypted {
-				fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
-				forceFullBackup = true
-			}
 		}
 	}
 
@@ -630,7 +626,7 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 		}
 
 	}
-	
+
 	if !forceFullBackup && len(previousDidx) > 0 {
 		fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
 
