@@ -38,7 +38,7 @@ func DefaultPerformanceConfig() PerformanceConfig {
 		WorkerCount:         0,              // 0 = auto-detect (will use CPU count, capped at 8)
 		
 		// Chunking
-		ChunkSizeMB:         4,   // 4MB average chunk size (PBS default)
+		ChunkSizeMB:         DEFAULT_CHUNK_AVG_SIZE_MB,   // 4MB average chunk size (PBS default)
 		
 		// Memory optimization
 		EnableZeroCopy:      false,  // Conservative default
@@ -111,14 +111,5 @@ func (p *PerformanceConfig) ValidateConfig() {
 	}
 	if p.ChunkSizeMB < 1 {
 		p.ChunkSizeMB = 4
-	}
-	
-	// Warn about excessive memory usage
-	estimatedMemoryMB := p.FileReadBufferMB + p.StreamReadBufferMB + p.PXARFlushBufferMB + 
-		(p.WorkerCount * p.ChunkSizeMB * 2) // Rough estimate for worker buffers
-	
-	if estimatedMemoryMB > 2048 { // More than 2GB (increased for high-performance mode)
-		// Could add logging here if we had a logger
-		// fmt.Printf("Warning: High memory usage estimated: ~%dMB\n", estimatedMemoryMB)
 	}
 }

@@ -88,11 +88,11 @@ func (c *ParallelChunkState) InitWithConfig(newchunk *atomic.Uint64, reusechunk 
 	c.cryptConfig = cryptConfig
 	c.config = config
 
-	chunkAvgSize := uint64(1024 * 1024 * 4) // 4MB average
+	chunkAvgSize := uint64(DEFAULT_CHUNK_SIZE) // 4MB average
 	if cryptConfig != nil {
 		// Reduce chunk size to account for encryption overhead (28 bytes for AES-GCM)
 		// Use safety margin to ensure max chunks stay under PBS 16MB limit
-		chunkAvgSize = uint64((1024 * 1024 * 4) - 100)
+		chunkAvgSize = uint64(DEFAULT_CHUNK_SIZE - 100)
 	}
 	c.C = Chunker{}
 	c.C.New(chunkAvgSize)

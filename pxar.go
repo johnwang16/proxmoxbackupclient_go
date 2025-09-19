@@ -39,13 +39,7 @@ const (
 	PXAR_GOODBYE_TAIL_MARKER uint64 = 0xef5eed5b753e1555
 )
 
-var catalog_magic = []byte{145, 253, 96, 249, 196, 103, 88, 213}
-
-// PXAR magic bytes in little-endian format for header alignment scanning
-var pxar_entry_magic_le = []byte{0xef, 0xac, 0x88, 0xe5, 0x74, 0x64, 0x95, 0xd5}    // PXAR_ENTRY
-var pxar_filename_magic_le = []byte{0xb3, 0x17, 0x39, 0x06, 0x21, 0x11, 0x70, 0x16} // PXAR_FILENAME
-var pxar_payload_magic_le = []byte{0x25, 0x1a, 0x7c, 0x0b, 0x1b, 0x7a, 0x14, 0x28}  // PXAR_PAYLOAD
-var pxar_goodbye_magic_le = []byte{0x1d, 0x73, 0xd5, 0x42, 0xa6, 0x4f, 0xec, 0x2f}  // PXAR_GOODBYE
+// Magic bytes moved to constants.go
 
 // PXAR entry header structure
 type PXARHeader struct {
@@ -188,7 +182,7 @@ type PXARArchive struct {
 func (a *PXARArchive) Flush() {
 
 	// Use configurable buffer size for optimal performance
-	bufferSize := 64 * 1024 // Default fallback
+	bufferSize := DEFAULT_BUFFER_SIZE // Default fallback
 	if a.perfConfig != nil {
 		bufferSize = a.perfConfig.GetBufferSizes().PXARFlushBuffer
 	}
@@ -294,7 +288,7 @@ func (a *PXARArchive) WriteDir(path string, dirname string, toplevel bool) Catal
 		a.buffer.WriteByte(0x00)
 	} else {
 		if a.catalogWriteCB != nil {
-			a.catalogWriteCB(catalog_magic)
+			a.catalogWriteCB(CATALOG_MAGIC)
 			a.catalog_pos = 8
 		}
 	}
@@ -493,7 +487,7 @@ func (a *PXARArchive) WriteFile(path string, basename string) CatalogFile {
 	a.Flush()
 
 	// Use configurable buffer for file reading
-	bufferSize := 64 * 1024 // Default fallback
+	bufferSize := DEFAULT_BUFFER_SIZE // Default fallback
 	if a.perfConfig != nil {
 		bufferSize = a.perfConfig.GetBufferSizes().FileReadBuffer
 	}

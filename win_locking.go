@@ -5,7 +5,7 @@ package main
 import "github.com/rodolfoag/gow32"
 import "syscall"
 
-const MutexName = "proxmoxbackupclient_go"
+// Mutex name moved to constants.go
 
 
 type Locking struct {
@@ -13,7 +13,7 @@ type Locking struct {
 }
 
 func (l *Locking) AcquireProcessLock() bool {
-	mutexid , err := gow32.CreateMutex(MutexName)
+	mutexid , err := gow32.CreateMutex(MUTEX_NAME)
 	if err != nil {
 		if exitcode := int(err.(syscall.Errno)); exitcode == gow32.ERROR_ALREADY_EXISTS {
 			return false 

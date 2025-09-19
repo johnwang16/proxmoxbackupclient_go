@@ -30,9 +30,7 @@ var defaultMailBodyTemplate = `{{if .Success}}Backup complete ({{.FromattedDurat
 Chunks New {{.NewChunks}}, Reused {{.ReusedChunks}}.{{else}}Error occurred while working, backup may be not completed.
 Last error is: {{.ErrorStr}}{{end}}`
 
-var didxMagic = []byte{28, 145, 78, 165, 25, 186, 179, 205}
-
-const DIDX_ENTRY_SIZE = 40 // 8 bytes offset + 32 bytes SHA256 digest
+// Constants moved to constants.go
 
 type ChunkState struct {
 	assignments        []string
@@ -63,11 +61,11 @@ func (c *ChunkState) Init(newchunk *atomic.Uint64 , reusechunk *atomic.Uint64, k
 	c.current_chunk = make([]byte, 0)
 	c.cryptConfig = cryptConfig
 	
-	chunkAvgSize := uint64(1024 * 1024 * 4)  // 4MB average
+	chunkAvgSize := uint64(DEFAULT_CHUNK_SIZE)
 	if cryptConfig != nil {
 		// Reduce chunk size to account for encryption overhead (28 bytes for AES-GCM)
 		// Use safety margin to ensure max chunks stay under PBS 16MB limit
-		chunkAvgSize = uint64((1024 * 1024 * 4) - 100)
+		chunkAvgSize = uint64(DEFAULT_CHUNK_SIZE - 100)
 	}
 	c.C = Chunker{}
 	c.C.New(chunkAvgSize)
@@ -481,7 +479,7 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 	if !forceFullBackup && len(previousDidx) > 0 {
 		fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
 
-		if !bytes.HasPrefix(previousDidx, didxMagic) {
+		if !bytes.HasPrefix(previousDidx, DIDX_MAGIC) {
 			fmt.Printf("Previous index has wrong magic (%s)!\n", previousDidx[:8])
 
 		} else {
@@ -633,7 +631,7 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 		// Download the previous dynamic index to figure out which chunks are the same
 		// to avoid unnecessary traffic and compression cpu usage
 
-		if !bytes.HasPrefix(previousDidx, didxMagic) {
+		if !bytes.HasPrefix(previousDidx, DIDX_MAGIC) {
 			fmt.Printf("Previous index has wrong magic (%s)!\n", previousDidx[:8])
 
 		} else {
@@ -697,7 +695,6 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 		}
 		defer f.Close()
 	}
-	/**/
 
 	// Use parallel processing for PXAR backups
 	pxarChunk := &ParallelChunkState{}

@@ -76,7 +76,7 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 	
 	fmt.Printf("Downloaded DIDX: %d bytes\n", len(didxData))
 	
-	if !bytes.HasPrefix(didxData, didxMagic) {
+	if !bytes.HasPrefix(didxData, DIDX_MAGIC) {
 		return fmt.Errorf("invalid DIDX magic bytes")
 	}
 	
@@ -389,7 +389,7 @@ func createRestoreReader(client *PBSClient, archiveName string, cryptConfig *Cry
 	
 	fmt.Printf("Downloaded DIDX: %d bytes\n", len(didxData))
 	
-	if !bytes.HasPrefix(didxData, didxMagic) {
+	if !bytes.HasPrefix(didxData, DIDX_MAGIC) {
 		return nil, fmt.Errorf("invalid DIDX magic bytes")
 	}
 	

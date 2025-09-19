@@ -102,10 +102,7 @@ type PBSClient struct {
 	writersManifest map[uint64]int
 }
 
-var blobCompressedMagic = []byte{49, 185, 88, 66, 111, 182, 163, 127}
-var blobUncompressedMagic = []byte{66, 171, 56, 7, 190, 131, 112, 161}
-var blobEncryptedMagic = []byte{123, 103, 133, 190, 34, 45, 76, 240}
-var blobEncryptedCompressedMagic = []byte{230, 89, 27, 191, 11, 191, 216, 11}
+// Magic bytes moved to constants.go
 
 // sanitizeFilename ensures filename complies with PBS regex requirements for stream backups
 func sanitizeFilename(name string) string {
@@ -192,7 +189,7 @@ func (pbs *PBSClient) CreateDynamicIndex(name string) (uint64, error) {
 
 func (pbs *PBSClient) UploadUncompressedChunk(writerid uint64, digest string, chunkdata []byte, originalSize int) error {
 	outBuffer := make([]byte, 0)
-	outBuffer = append(outBuffer, blobUncompressedMagic...)
+	outBuffer = append(outBuffer, BLOB_UNCOMPRESSED_MAGIC...)
 	checksum := crc32.Checksum(chunkdata, crc32.IEEETable)
 	outBuffer = binary.LittleEndian.AppendUint32(outBuffer, checksum)
 	outBuffer = append(outBuffer, chunkdata...)
@@ -221,7 +218,7 @@ func (pbs *PBSClient) UploadUncompressedChunk(writerid uint64, digest string, ch
 
 func (pbs *PBSClient) UploadCompressedChunk(writerid uint64, digest string, chunkdata []byte, originalSize int) error {
 	outBuffer := make([]byte, 0)
-	outBuffer = append(outBuffer, blobCompressedMagic...)
+	outBuffer = append(outBuffer, BLOB_COMPRESSED_MAGIC...)
 	compressedData := make([]byte, 0)
 
 	//opt := zstd.WithEncoderLevel(zstd.SpeedFastest)
@@ -332,7 +329,7 @@ func (pbs *PBSClient) CloseDynamicIndex(writerid uint64, checksum string, totals
 
 func (pbs *PBSClient) UploadBlob(name string, data []byte) error {
 	out := make([]byte, 0)
-	out = append(out, blobUncompressedMagic...)
+	out = append(out, BLOB_UNCOMPRESSED_MAGIC...)
 
 	checksum := crc32.ChecksumIEEE(data)
 	out = binary.LittleEndian.AppendUint32(out, checksum)
