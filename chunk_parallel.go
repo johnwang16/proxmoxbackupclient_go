@@ -119,7 +119,7 @@ func (c *ParallelChunkState) InitWithConfig(newchunk *atomic.Uint64, reusechunk 
 		New: func() interface{} {
 			// Pre-allocate buffers slightly larger than average chunk size
 			// This reduces allocations for most chunks
-			return make([]byte, 0, 8*1024*1024) // 8MB capacity
+			return make([]byte, 0, BUFFER_POOL_SIZE) // 8MB capacity
 		},
 	}
 }

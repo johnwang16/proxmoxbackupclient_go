@@ -19,6 +19,24 @@ const (
 
 	// MUTEX_NAME is used for Windows single instance locking
 	MUTEX_NAME = "proxmoxbackupclient_go"
+
+	// Buffer sizes in bytes
+	COPY_BUFFER_SIZE = 32 * 1024 // 32KB for file copy operations
+	BUFFER_POOL_SIZE = 8 * 1024 * 1024 // 8MB for buffer pool capacity
+
+	// Archive and file extensions
+	PXAR_ARCHIVE_NAME = "backup.pxar.didx"
+	CATALOG_ARCHIVE_NAME = "catalog.pcat1.didx"
+	DIDX_EXTENSION = ".didx"
+	FIDX_EXTENSION = ".fidx"
+
+	// API endpoints
+	API_BACKUP_ENDPOINT = "/api2/json/backup"
+	API_READER_ENDPOINT = "/api2/json/reader"
+	API_SNAPSHOTS_ENDPOINT = "/api2/json/admin/datastore/"
+
+	// Default log level
+	DEFAULT_LOG_LEVEL = "info"
 )
 
 // Magic byte arrays for various file formats and protocols

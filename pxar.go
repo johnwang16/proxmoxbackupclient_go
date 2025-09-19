@@ -896,7 +896,7 @@ func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string, filterP
 
 // Helper function to copy N bytes (like io.CopyN but with better error handling)
 func copyN(dst *os.File, src io.Reader, n int64) (int64, error) {
-	buf := make([]byte, 32*1024) // 32KB buffer
+	buf := make([]byte, COPY_BUFFER_SIZE) // 32KB buffer
 	var written int64
 	
 	for written < n {

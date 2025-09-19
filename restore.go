@@ -153,7 +153,7 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 
 // restorePXAR restores a PXAR archive and extracts it to a directory
 func restorePXAR(client *PBSClient, outputDir string, cryptConfig *CryptConfig, snapshotTime string, restorePath string) error {
-	archiveName := "backup.pxar.didx"
+	archiveName := PXAR_ARCHIVE_NAME
 	
 	// Create output directory if it doesn't exist
 	err := os.MkdirAll(outputDir, 0755)

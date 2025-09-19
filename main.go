@@ -345,7 +345,7 @@ func main() {
 		fmt.Printf("Starting restore mode\n")
 		
 		// Determine restore type based on archive name
-		if strings.HasSuffix(cfg.RestoreArchive, ".pxar.didx") {
+		if strings.HasSuffix(cfg.RestoreArchive, ".pxar"+DIDX_EXTENSION) {
 			// Full PXAR restore
 			err = restorePXAR(client, cfg.RestoreOutput, cryptConfig, cfg.RestoreSnapshot, restorePath)
 		} else {
@@ -367,8 +367,8 @@ func main() {
 		err = backup(client, newchunk, reusechunk, cfg.PxarOut, cfg.BackupSourceDir, cryptConfig, cfg)
 	} else if cfg.BackupStreamName != "" {
 		sn := cfg.BackupStreamName
-		if ! strings.HasSuffix(sn, ".didx" ) {
-			sn += ".didx"
+		if ! strings.HasSuffix(sn, DIDX_EXTENSION ) {
+			sn += DIDX_EXTENSION
 		}
 		fmt.Printf("Backing up from STDIN to %s", sn)
 		err = backup_stream(client, newchunk, reusechunk, sn, os.Stdin, cryptConfig, cfg )
@@ -596,7 +596,7 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	client.Connect(false)
 
 	archive := &PXARArchive{}
-	archive.archivename = "backup.pxar.didx"
+	archive.archivename = PXAR_ARCHIVE_NAME
 	archive.perfConfig = config.Performance
 
 	forceFullBackup := false
@@ -707,7 +707,7 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	if err != nil {
 		return err
 	}
-	pcat1Chunk.wrid, err = client.CreateDynamicIndex("catalog.pcat1.didx")
+	pcat1Chunk.wrid, err = client.CreateDynamicIndex(CATALOG_ARCHIVE_NAME)
 	if err != nil {
 		return err
 	}

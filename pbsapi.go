@@ -107,7 +107,7 @@ type PBSClient struct {
 // sanitizeFilename ensures filename complies with PBS regex requirements for stream backups
 func sanitizeFilename(name string) string {
 	// For standard backups (backup.pxar.didx, catalog.pcat1.didx), return as-is
-	if name == "backup.pxar.didx" || name == "catalog.pcat1.didx" {
+	if name == PXAR_ARCHIVE_NAME || name == CATALOG_ARCHIVE_NAME {
 		return name
 	}
 	
@@ -125,14 +125,14 @@ func sanitizeFilename(name string) string {
 	sanitized := string(result)
 	
 	// Ensure it has a valid extension for dynamic indices
-	if !strings.HasSuffix(sanitized, ".didx") && !strings.HasSuffix(sanitized, ".fidx") {
+	if !strings.HasSuffix(sanitized, DIDX_EXTENSION) && !strings.HasSuffix(sanitized, FIDX_EXTENSION) {
 		if strings.Contains(sanitized, ".") {
 			// Replace extension with .didx
 			lastDot := strings.LastIndex(sanitized, ".")
-			sanitized = sanitized[:lastDot] + ".didx"
+			sanitized = sanitized[:lastDot] + DIDX_EXTENSION
 		} else {
 			// Add .didx extension
-			sanitized += ".didx"
+			sanitized += DIDX_EXTENSION
 		}
 	}
 	
@@ -577,9 +577,9 @@ func (pbs *PBSClient) Connect(reader bool) {
 				}
 				
 				// Use different endpoint for reader vs backup protocol
-				endpoint := "/api2/json/backup"
+				endpoint := API_BACKUP_ENDPOINT
 				if reader {
-					endpoint = "/api2/json/reader"
+					endpoint = API_READER_ENDPOINT
 				}
 				
 				requestLine := "GET " + endpoint + "?" + q.Encode() + " HTTP/1.1\r\n"
@@ -730,7 +730,7 @@ func (pbs *PBSClient) ListSnapshots() ([]BackupSnapshot, error) {
 		q.Add("ns", pbs.namespace)
 	}
 
-	req, err := http.NewRequest("GET", pbs.baseurl+"/api2/json/admin/datastore/"+pbs.datastore+"/snapshots?"+q.Encode(), nil)
+	req, err := http.NewRequest("GET", pbs.baseurl+API_SNAPSHOTS_ENDPOINT+pbs.datastore+"/snapshots?"+q.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}

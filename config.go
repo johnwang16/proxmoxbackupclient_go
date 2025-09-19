@@ -115,7 +115,7 @@ func loadConfig() (*Config, bool, string) {
 	encryptionKeyPathFlag := flag.String("encryption-key-path", "", "Path to encryption key file (optional)")
 	encryptionPasswordFlag := flag.String("encryption-password", "", "Password for encrypted key file (optional)")
 	masterKeyPathFlag := flag.String("master-key-path", "", "Path to RSA master key for key recovery (optional)")
-	logLevelFlag := flag.String("log-level", "info", "Log level: info, performance, debug (default: info)")
+	logLevelFlag := flag.String("log-level", DEFAULT_LOG_LEVEL, "Log level: info, performance, debug (default: info)")
 	
 	// Performance tuning flags
 	fileReadBufferFlag := flag.Int("file-read-buffer-mb", 0, "File read buffer size in MB (0=auto) (optional)")
@@ -125,7 +125,7 @@ func loadConfig() (*Config, bool, string) {
 	// Restore flags
 	// Note: Use -restore=* or just -restore * to restore everything, or -restore=path for specific path
 	restoreFlag := flag.String("restore", "", "Enable restore mode with optional path filter (use '*' to restore everything)")
-	restoreArchiveFlag := flag.String("restore-archive", "backup.pxar.didx", "Archive name to restore (defaults to backup.pxar.didx)")
+	restoreArchiveFlag := flag.String("restore-archive", PXAR_ARCHIVE_NAME, "Archive name to restore (defaults to backup.pxar.didx)")
 	restoreOutputFlag := flag.String("restore-output", "", "Output path for restored data (required when using -restore)")
 	restoreSnapshotFlag := flag.String("restore-snapshot", "latest", "Backup snapshot timestamp (e.g., 2024-01-01T12:00:00Z) or 'latest' for most recent (default: latest)")
 	listSnapshotsFlag := flag.Bool("list-snapshots", false, "List available backup snapshots and exit")
