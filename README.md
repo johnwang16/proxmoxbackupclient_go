@@ -70,21 +70,16 @@ proxmoxbackupgo.exe
         Password for encrypted key file (optional)
   -master-key-path string
         Path to RSA master key for key recovery (optional)
-  -force-full-backup bool
-        Force a full backup, ignoring previous backup for incremental deduplication (optional)
 
   -config string
         Path to JSON config file. If this flag is provided all the others will override the loaded config file
 
 ```
 
-For JSON configuration, several examples are provided:
-- `config.json.example` - Basic backup configuration
-- `config.json.encryption.example` - Configuration with encryption enabled for backup and restore
-- `config.combined.example.json` - Combined config supporting both backup and restore modes
-- `config.restore.example.json` - Restore-only configuration
+For JSON configuration, a comprehensive example is provided:
+- `config.example.json` - Complete configuration with all possible settings for backup, restore, encryption, performance tuning, and email notifications
 
-Fill in only the needed fields.
+This single configuration file demonstrates all available options and can be used for any operation mode. Simply fill in the needed fields and leave others empty or with default values.
 
 
 Note on mail templating:
@@ -258,7 +253,7 @@ proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secr
 
 The same config file can contain both backup and restore settings. Use the `-restore` flag to switch modes:
 
-**Combined config file (config.json):**
+**Example config file (config.example.json):**
 ```json
 {
   "baseurl": "https://pbs.example.com:8007",
@@ -269,7 +264,6 @@ The same config file can contain both backup and restore settings. Use the `-res
   
   "comment": "Backup settings (used when -restore flag is NOT present)",
   "backupdir": "C:\\data",
-  "force-full-backup": false,
   
   "comment": "Restore settings (used when -restore flag IS present)",
   "restore-archive": "backup.pxar.didx",
@@ -284,45 +278,34 @@ The same config file can contain both backup and restore settings. Use the `-res
 
 **For backup mode:**
 ```shell
-proxmoxbackupgo.exe -config config.json
+proxmoxbackupgo.exe -config config.example.json
 ```
 
 **For restore mode (same config file):**
 ```shell
-proxmoxbackupgo.exe -config config.json -restore "*"
+proxmoxbackupgo.exe -config config.example.json -restore "*"
 ```
 
 **Restore specific path:**
 ```shell
-proxmoxbackupgo.exe -config config.json -restore "Documents/folder"
+proxmoxbackupgo.exe -config config.example.json -restore "Documents/folder"
 ```
 
 **Override config values:**
 ```shell
-proxmoxbackupgo.exe -config config.json -restore "*" -restore-output "D:\\different-location"
+proxmoxbackupgo.exe -config config.example.json -restore "*" -restore-output "D:\\different-location"
 ```
 
 
-Force Full Backup
-==================
+Automatic Full Backup Detection
+==================================
 
-The `-force-full-backup` flag disables incremental backup and forces a complete backup of all data. 
-
-**Automatic Detection**: The client now automatically detects when switching between encrypted and unencrypted modes and forces a full backup to prevent chunk format mismatches. You'll see a message like:
+The client automatically detects when switching between encrypted and unencrypted modes and forces a full backup to prevent chunk format mismatches. You'll see a message like:
 ```
 Encryption mode mismatch detected (current: true, previous: false) - forcing full backup
 ```
 
-**Manual Override**: You can still manually force full backups when needed for:
-
-1. **Recovery scenarios**: After corruption or when you want to ensure a clean backup baseline
-2. **Storage migration**: When moving to a new backup repository
-3. **Troubleshooting**: When incremental backups aren't working as expected
-
-Example forcing full backup:
-```shell
-proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backupdir "C:\data" -force-full-backup
-```
+This automatic detection ensures data integrity when changing encryption settings without requiring manual intervention.
 
 Known Issues
 ============
