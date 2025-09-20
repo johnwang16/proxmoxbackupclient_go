@@ -546,28 +546,52 @@ func (a *PXARArchive) WriteFile(path string, basename string) CatalogFile {
 	}
 }
 
+const (
+	PXAR_HEADER_MIN_SIZE   = 16
+	PXAR_ENTRY_STRUCT_SIZE = 40
+)
+
+// PXARExtractor encapsulates all extraction state
+type PXARExtractor struct {
+	reader       io.ReadSeeker
+	outputDir    string
+	filterPath   string
+	dirStack     []DirectoryStackEntry
+	currentFile  string
+	currentEntry *PXAREntry
+}
+
 // ExtractPXAR extracts a PXAR archive to the specified directory
 func ExtractPXAR(pxarFile string, outputDir string) error {
-	// Open PXAR file
 	file, err := os.Open(pxarFile)
 	if err != nil {
-		return fmt.Errorf("failed to open PXAR file: %v", err)
+		return fmt.Errorf("failed to open PXAR file: %w", err)
 	}
 	defer file.Close()
-	
+
 	return ExtractPXARFromReader(file, outputDir, "")
 }
 
 // ExtractPXARFromReader extracts a PXAR archive from an io.ReadSeeker to the specified directory
 func ExtractPXARFromReader(reader io.ReadSeeker, outputDir string, filterPath string) error {
 	// Create output directory if it doesn't exist
-	err := os.MkdirAll(outputDir, 0755)
-	if err != nil {
-		return fmt.Errorf("failed to create output directory: %v", err)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
 	}
-	
-	// Extract the archive with optional path filtering
-	return extractPXARWithDirectoryStack(reader, outputDir, filterPath)
+
+	// Create extractor with all state encapsulated
+	extractor := &PXARExtractor{
+		reader:     reader,
+		outputDir:  outputDir,
+		filterPath: normalizeFilterPath(filterPath),
+		dirStack: []DirectoryStackEntry{{
+			path:     "",
+			baseDir:  outputDir,
+			filename: "",
+		}},
+	}
+
+	return extractor.Extract()
 }
 
 
@@ -592,334 +616,329 @@ func shouldExtractPath(fullPath string, filterPath string) bool {
 	return fullPath == filterPath || strings.HasPrefix(fullPath, filterPath+string(filepath.Separator))
 }
 
-// extractPXARWithDirectoryStack extracts PXAR using directory stack management like Rust implementation
-func extractPXARWithDirectoryStack(reader io.ReadSeeker, baseDir string, filterPath string) error {
-	// Initialize directory stack with root entry
-	directoryStack := []DirectoryStackEntry{{
-		path:     "",
-		baseDir:  baseDir,
-		filename: "",
-	}}
-	
-	var currentFilename string
-	var currentEntry *PXAREntry // Store current entry metadata for later use
-	
+// Extract performs the extraction with preserved directory timing
+func (e *PXARExtractor) Extract() error {
 	for {
-		// Read PXAR header
-		var header PXARHeader
-		err := binary.Read(reader, binary.LittleEndian, &header)
+		header, err := e.readHeader()
 		if err != nil {
-			if err == io.EOF || err.Error() == "EOF" {
-				return nil // Normal end of archive
+			if err == io.EOF {
+				return nil // Normal termination
 			}
-			return fmt.Errorf("failed to read PXAR header: %v", err)
+			return err
 		}
-		
-		// Validate header length
-		if header.Length < 16 || header.Length > 0x10000000000 { // 1TB max
-			return fmt.Errorf("invalid PXAR header length: %d (type: 0x%x)", header.Length, header.Type)
+
+		if err := e.processEntry(header); err != nil {
+			return err
 		}
-		
-		currentDir := directoryStack[len(directoryStack)-1]
-		
-		// Handle different PXAR entry types
-		switch header.Type {
-		case PXAR_ENTRY, PXAR_ENTRY_V1:
-			// Read entry metadata
-			entryDataLength := header.Length - 16
-			
-			var entry PXAREntry
-			err = binary.Read(reader, binary.LittleEndian, &entry)
-			if err != nil {
-				return fmt.Errorf("failed to read PXAR entry: %v", err)
-			}
-			
-			// Store entry metadata for later use when creating file/directory
-			currentEntry = &entry
-			
-			// Skip any remaining entry data
-			structSize := int64(40)
-			remaining := int64(entryDataLength) - structSize
-			if remaining > 0 {
-				_, err = reader.Seek(remaining, 1)
-				if err != nil {
-					return fmt.Errorf("failed to skip remaining PXAR_ENTRY data: %v", err)
-				}
-			}
-			
-		case PXAR_FILENAME:
-			// Read filename
-			nameLength := header.Length - 16
-			nameBytes := make([]byte, nameLength)
-			_, err = reader.Read(nameBytes)
-			if err != nil {
-				return fmt.Errorf("failed to read filename: %v", err)
-			}
-			
-			// Remove null terminator
-			currentFilename = string(bytes.TrimRight(nameBytes, "\x00"))
-			
-		case PXAR_PAYLOAD:
-			// File content - this means currentFilename is a file
-			payloadLength := header.Length - 16
-			
-			if currentFilename != "" {
-				// Build full file path using directory stack
-				var filePath string
-				var relativePath string
-				if currentDir.path == "" {
-					filePath = filepath.Join(currentDir.baseDir, currentFilename)
-					relativePath = currentFilename
-				} else {
-					filePath = filepath.Join(currentDir.baseDir, currentDir.path, currentFilename)
-					relativePath = filepath.Join(currentDir.path, currentFilename)
-				}
-				
-				// Check if this file should be extracted based on filter
-				if !shouldExtractPath(relativePath, filterPath) {
-					// Skip this file - just read and discard the payload
-					_, err = reader.Seek(int64(payloadLength), 1)
-					if err != nil {
-						return fmt.Errorf("failed to skip filtered file payload: %v", err)
-					}
-					currentFilename = ""
-					currentEntry = nil
-					continue
-				}
-				
-				// Create parent directory if needed
-				err = os.MkdirAll(filepath.Dir(filePath), 0755)
-				if err != nil {
-					return fmt.Errorf("failed to create parent directory for %s: %v", filePath, err)
-				}
-				
-				// Create and write file
-				outFile, err := os.Create(filePath)
-				if err != nil {
-					return fmt.Errorf("failed to create file %s: %v", filePath, err)
-				}
-				
-				// Copy payload data to file
-				_, err = copyN(outFile, reader, int64(payloadLength))
-				outFile.Close()
-				if err != nil {
-					return fmt.Errorf("failed to write file content: %v", err)
-				}
-				
-				// Apply file attributes if we have metadata
-				if currentEntry != nil {
-					// Apply permissions
-					fileMode := os.FileMode(currentEntry.Mode & 0777)
-					err = os.Chmod(filePath, fileMode)
-					if err != nil {
-						fmt.Printf("Warning: failed to set permissions for %s: %v\n", filePath, err)
-					}
-					
-					// Apply ownership (may fail on non-root)
-					err = os.Chown(filePath, int(currentEntry.UID), int(currentEntry.GID))
-					if err != nil {
-						// This is expected to fail for non-root users, so don't print warning
-					}
-					
-					// Apply timestamps
-					mtime := time.Unix(int64(currentEntry.MTime), int64(currentEntry.MTimeNs))
-					err = os.Chtimes(filePath, mtime, mtime)
-					if err != nil {
-						fmt.Printf("Warning: failed to set timestamps for %s: %v\n", filePath, err)
-					}
-				}
-				
-				if currentDir.path == "" {
-					fmt.Printf("Extracted file: %s (%d bytes)\n", currentFilename, payloadLength)
-				} else {
-					fmt.Printf("Extracted file: %s/%s (%d bytes)\n", currentDir.path, currentFilename, payloadLength)
-				}
-				currentFilename = "" // Reset after extracting file
-				currentEntry = nil   // Reset entry metadata
-			} else {
-				_, err = reader.Seek(int64(payloadLength), 1)
-				if err != nil {
-					return fmt.Errorf("failed to skip payload: %v", err)
-				}
-			}
-			
-		case PXAR_SYMLINK:
-			// Symbolic link target
-			linkLength := header.Length - 16
-			linkBytes := make([]byte, linkLength)
-			_, err = reader.Read(linkBytes)
-			if err != nil {
-				return fmt.Errorf("failed to read symlink target: %v", err)
-			}
-			
-			if currentFilename != "" {
-				// Build full symlink path using directory stack
-				var linkPath string
-				if currentDir.path == "" {
-					linkPath = filepath.Join(currentDir.baseDir, currentFilename)
-				} else {
-					linkPath = filepath.Join(currentDir.baseDir, currentDir.path, currentFilename)
-				}
-				linkTarget := string(bytes.TrimRight(linkBytes, "\x00"))
-				
-				err = os.Symlink(linkTarget, linkPath)
-				if err != nil {
-					fmt.Printf("Warning: failed to create symlink %s -> %s: %v\n", linkPath, linkTarget, err)
-				} else {
-					// Note: On most systems, symlink timestamps and ownership cannot be changed
-					// but we'll try to set them anyway for completeness
-					if currentEntry != nil {
-						// Try to set symlink timestamps (may not work on all systems)
-						_ = time.Unix(int64(currentEntry.MTime), int64(currentEntry.MTimeNs))
-						// os.Chtimes follows symlinks, so we can't directly set symlink timestamps
-						// This is a limitation on most Unix systems
-					}
-					
-					if currentDir.path == "" {
-						fmt.Printf("Extracted symlink: %s -> %s\n", currentFilename, linkTarget)
-					} else {
-						fmt.Printf("Extracted symlink: %s/%s -> %s\n", currentDir.path, currentFilename, linkTarget)
-					}
-				}
-				currentFilename = "" // Reset after creating symlink
-				currentEntry = nil   // Reset entry metadata
-			}
-			
-		case PXAR_GOODBYE:
-			// Skip any payload bytes for PXAR_GOODBYE
-			payloadLength := header.Length - 16
-			if payloadLength > 0 {
-				_, err = reader.Seek(int64(payloadLength), 1)
-				if err != nil {
-					return fmt.Errorf("failed to skip PXAR_GOODBYE payload: %v", err)
-				}
-			}
-			
-			// This means "leave current directory" like in Rust implementation
-			if len(directoryStack) > 1 {
-				// Pop from directory stack
-				directoryStack = directoryStack[:len(directoryStack)-1]
-				currentFilename = "" // Reset filename when leaving directory
-			} else {
-				// We're at the root, this might be end of archive
-				// Continue processing to see if there are more entries
-			}
-			
-		default:
-			// Skip unknown entry types
-			skipLength := header.Length - 16
-			if skipLength > 0 {
-				_, err := reader.Seek(int64(skipLength), 1)
-				if err != nil {
-					return fmt.Errorf("failed to skip unknown entry type 0x%x (length %d): %v", header.Type, skipLength, err)
-				}
-			}
-		}
-		
-		// Check if we need to enter a directory (after processing PXAR_FILENAME for a directory)
-		// This happens when we have a filename that represents a directory
-		if currentFilename != "" {
-			// We need to check if this will be a directory by looking ahead for nested entries
-			// For now, we'll handle directory entry when we encounter the directory structure
-			// If the next entry is another PXAR_FILENAME, then currentFilename is a directory
-			
-			// Peek ahead to see if we're about to enter a directory
-			currentPos, _ := reader.Seek(0, 1)
-			var peekHeader PXARHeader
-			peekErr := binary.Read(reader, binary.LittleEndian, &peekHeader)
-			_, _ = reader.Seek(currentPos, 0) // Reset position
-			
-			if peekErr == nil && (peekHeader.Type == PXAR_FILENAME || peekHeader.Type == PXAR_GOODBYE) {
-				// This suggests currentFilename is a directory - push it onto stack
-				var newDirPath string
-				if currentDir.path == "" {
-					newDirPath = currentFilename
-				} else {
-					newDirPath = filepath.Join(currentDir.path, currentFilename)
-				}
-				
-				// Check if this directory should be extracted based on filter
-				shouldExtract := shouldExtractPath(newDirPath, filterPath)
-				
-				if shouldExtract {
-					// Create the directory
-					fullDirPath := filepath.Join(currentDir.baseDir, newDirPath)
-					err = os.MkdirAll(fullDirPath, 0755)
-					if err != nil {
-						return fmt.Errorf("failed to create directory %s: %v", fullDirPath, err)
-					}
-					
-					// Apply directory attributes if we have metadata
-					if currentEntry != nil {
-					// Apply permissions
-					dirMode := os.FileMode(currentEntry.Mode & 0777)
-					err = os.Chmod(fullDirPath, dirMode)
-					if err != nil {
-						fmt.Printf("Warning: failed to set permissions for directory %s: %v\n", fullDirPath, err)
-					}
-					
-					// Apply ownership (may fail on non-root)
-					err = os.Chown(fullDirPath, int(currentEntry.UID), int(currentEntry.GID))
-					if err != nil {
-						// This is expected to fail for non-root users, so don't print warning
-					}
-					
-						// Apply timestamps
-						mtime := time.Unix(int64(currentEntry.MTime), int64(currentEntry.MTimeNs))
-						err = os.Chtimes(fullDirPath, mtime, mtime)
-						if err != nil {
-							fmt.Printf("Warning: failed to set timestamps for directory %s: %v\n", fullDirPath, err)
-						}
-					}
-					
-					fmt.Printf("Created directory: %s\n", newDirPath)
-				}
-				
-				// Always push directory onto stack (even if filtered) for proper traversal
-				directoryStack = append(directoryStack, DirectoryStackEntry{
-					path:     newDirPath,
-					baseDir:  currentDir.baseDir,
-					filename: currentFilename,
-				})
-				currentFilename = "" // Reset after entering directory
-				currentEntry = nil   // Reset entry metadata
-			}
+
+		// Directory entry check at END of loop
+		if e.currentFile != "" && e.isDirectory() {
+			e.enterDirectory()
 		}
 	}
 }
 
+// readHeader reads and validates a PXAR header
+func (e *PXARExtractor) readHeader() (*PXARHeader, error) {
+	var header PXARHeader
+	err := binary.Read(e.reader, binary.LittleEndian, &header)
+	if err != nil {
+		return nil, err
+	}
 
-// Helper function to copy N bytes (like io.CopyN but with better error handling)
-func copyN(dst *os.File, src io.Reader, n int64) (int64, error) {
-	buf := make([]byte, COPY_BUFFER_SIZE) // 32KB buffer
-	var written int64
-	
-	for written < n {
-		remaining := n - written
-		toRead := int64(len(buf))
-		if remaining < toRead {
-			toRead = remaining
-		}
-		
-		nr, err := src.Read(buf[:toRead])
-		if nr > 0 {
-			nw, ew := dst.Write(buf[:nr])
-			if nw > 0 {
-				written += int64(nw)
-			}
-			if ew != nil {
-				return written, ew
-			}
-			if nr != nw {
-				return written, fmt.Errorf("short write")
-			}
-		}
-		if err != nil {
-			if err.Error() == "EOF" && written == n {
-				break
-			}
-			return written, err
+	// Validate header
+	if header.Length < PXAR_HEADER_MIN_SIZE {
+		return nil, fmt.Errorf("invalid header length: %d (type: 0x%x)", header.Length, header.Type)
+	}
+
+	return &header, nil
+}
+
+// processEntry routes to appropriate handler based on entry type
+func (e *PXARExtractor) processEntry(header *PXARHeader) error {
+	switch header.Type {
+	case PXAR_ENTRY, PXAR_ENTRY_V1:
+		return e.processMetadata(header)
+	case PXAR_FILENAME:
+		return e.processFilename(header)
+	case PXAR_PAYLOAD:
+		return e.processPayload(header)
+	case PXAR_SYMLINK:
+		return e.processSymlink(header)
+	case PXAR_GOODBYE:
+		return e.processGoodbye(header)
+	default:
+		// Skip unknown entry types
+		return e.skipBytes(int64(header.Length - PXAR_HEADER_MIN_SIZE))
+	}
+}
+
+// processMetadata handles entry metadata
+func (e *PXARExtractor) processMetadata(header *PXARHeader) error {
+	var entry PXAREntry
+	if err := binary.Read(e.reader, binary.LittleEndian, &entry); err != nil {
+		return fmt.Errorf("failed to read PXAR entry: %w", err)
+	}
+	// Store entry metadata for later use when creating file/directory
+	e.currentEntry = &entry
+
+	// Skip any remaining data in the entry
+	remaining := int64(header.Length) - PXAR_HEADER_MIN_SIZE - PXAR_ENTRY_STRUCT_SIZE
+	if remaining > 0 {
+		return e.skipBytes(remaining)
+	}
+
+	return nil
+}
+
+// processFilename handles filename entries
+func (e *PXARExtractor) processFilename(header *PXARHeader) error {
+	// Read filename
+	nameLength := header.Length - PXAR_HEADER_MIN_SIZE
+	nameBytes := make([]byte, nameLength)
+
+	if _, err := io.ReadFull(e.reader, nameBytes); err != nil {
+		return fmt.Errorf("failed to read filename: %w", err)
+	}
+	// Remove null terminator
+	e.currentFile = string(bytes.TrimRight(nameBytes, "\x00"))
+	return nil
+}
+
+// processPayload handles file content extraction
+func (e *PXARExtractor) processPayload(header *PXARHeader) error {
+	payloadLength := header.Length - PXAR_HEADER_MIN_SIZE
+
+	// No current file means orphaned payload - skip it
+	if e.currentFile == "" {
+		return e.skipBytes(int64(payloadLength))
+	}
+
+	// Build the relative path for this file
+	relativePath := e.buildRelativePath()
+
+	// Check if we should extract this file based on filter
+	if !e.shouldExtract(relativePath) {
+		e.currentFile = ""
+		e.currentEntry = nil
+		return e.skipBytes(int64(payloadLength))
+	}
+
+	// Extract the file
+	if err := e.extractFile(relativePath, payloadLength); err != nil {
+		return err
+	}
+
+	// Reset state for next file
+	e.currentFile = ""
+	e.currentEntry = nil
+
+	return nil
+}
+
+// processSymlink handles symbolic link creation
+func (e *PXARExtractor) processSymlink(header *PXARHeader) error {
+	linkLength := header.Length - PXAR_HEADER_MIN_SIZE
+	linkBytes := make([]byte, linkLength)
+
+	if _, err := io.ReadFull(e.reader, linkBytes); err != nil {
+		return fmt.Errorf("failed to read symlink target: %w", err)
+	}
+
+	if e.currentFile == "" {
+		return nil // Orphaned symlink data
+	}
+
+	relativePath := e.buildRelativePath()
+
+	if !e.shouldExtract(relativePath) {
+		e.currentFile = ""
+		e.currentEntry = nil
+		return nil
+	}
+
+	target := string(bytes.TrimRight(linkBytes, "\x00"))
+	if err := e.createSymlink(relativePath, target); err != nil {
+		// Log warning but don't fail extraction
+		fmt.Printf("Warning: %v\n", err)
+	}
+
+	e.currentFile = ""
+	e.currentEntry = nil
+
+	return nil
+}
+
+// processGoodbye handles directory exit
+func (e *PXARExtractor) processGoodbye(header *PXARHeader) error {
+	// Skip goodbye payload
+	payloadLength := header.Length - PXAR_HEADER_MIN_SIZE
+	if payloadLength > 0 {
+		if err := e.skipBytes(int64(payloadLength)); err != nil {
+			return err
 		}
 	}
-	return written, nil
+
+	// Pop directory from stack if not at root
+	if len(e.dirStack) > 1 {
+		e.dirStack = e.dirStack[:len(e.dirStack)-1]
+		e.currentFile = ""
+	}
+
+	return nil
+}
+
+// Helper methods
+
+// isDirectory checks if current entry is a directory by peeking ahead
+func (e *PXARExtractor) isDirectory() bool {
+	currentPos, _ := e.reader.Seek(0, io.SeekCurrent)
+	defer e.reader.Seek(currentPos, io.SeekStart)
+
+	var peekHeader PXARHeader
+	err := binary.Read(e.reader, binary.LittleEndian, &peekHeader)
+
+	return err == nil && (peekHeader.Type == PXAR_FILENAME || peekHeader.Type == PXAR_GOODBYE)
+}
+
+// enterDirectory handles directory entry and stack management
+func (e *PXARExtractor) enterDirectory() {
+	relativePath := e.buildRelativePath()
+
+	// Create directory if it should be extracted
+	if e.shouldExtract(relativePath) {
+		fullPath := filepath.Join(e.outputDir, relativePath)
+
+		if err := os.MkdirAll(fullPath, 0755); err != nil {
+			fmt.Printf("Warning: failed to create directory %s: %v\n", fullPath, err)
+		} else {
+			e.applyFileAttributes(fullPath)
+			fmt.Printf("Created directory: %s\n", relativePath)
+		}
+	}
+
+	// Update directory stack
+	currentDir := e.dirStack[len(e.dirStack)-1]
+	e.dirStack = append(e.dirStack, DirectoryStackEntry{
+		path:     relativePath,
+		baseDir:  currentDir.baseDir,
+		filename: e.currentFile,
+	})
+
+	e.currentFile = ""
+	e.currentEntry = nil
+}
+
+// buildRelativePath constructs the current relative path
+func (e *PXARExtractor) buildRelativePath() string {
+	currentDir := e.dirStack[len(e.dirStack)-1]
+	if currentDir.path == "" {
+		return e.currentFile
+	}
+	return filepath.Join(currentDir.path, e.currentFile)
+}
+
+// shouldExtract determines if a path matches the filter
+func (e *PXARExtractor) shouldExtract(relativePath string) bool {
+	if e.filterPath == "" {
+		return true // No filter, extract everything
+	}
+
+	normalizedPath := strings.ToLower(filepath.Clean(relativePath))
+	return normalizedPath == e.filterPath ||
+	       strings.HasPrefix(normalizedPath, e.filterPath+string(filepath.Separator))
+}
+
+// extractFile extracts file content to disk
+func (e *PXARExtractor) extractFile(relativePath string, size uint64) error {
+	// Print file name before starting extraction (no newline)
+	fmt.Printf("Extracting file: %s", relativePath)
+
+	fullPath := filepath.Join(e.outputDir, relativePath)
+
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return fmt.Errorf("failed to create parent directory for %s: %w", fullPath, err)
+	}
+
+	// Create the file
+	file, err := os.Create(fullPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file %s: %w", fullPath, err)
+	}
+	defer file.Close()
+
+	written, err := io.CopyN(file, e.reader, int64(size))
+	if err != nil {
+		return fmt.Errorf("failed to write file content: %w", err)
+	}
+
+	// Apply file attributes
+	e.applyFileAttributes(fullPath)
+
+	// Complete the line with done message
+	fmt.Printf(" - done (%d bytes)\n", written)
+	return nil
+}
+
+// createSymlink creates a symbolic link
+func (e *PXARExtractor) createSymlink(relativePath, target string) error {
+	fullPath := filepath.Join(e.outputDir, relativePath)
+
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return fmt.Errorf("failed to create parent directory for symlink: %w", err)
+	}
+
+	if err := os.Symlink(target, fullPath); err != nil {
+		return fmt.Errorf("failed to create symlink %s -> %s: %w", fullPath, target, err)
+	}
+
+	fmt.Printf("Extracted symlink: %s -> %s\n", relativePath, target)
+	return nil
+}
+
+// applyFileAttributes applies metadata to extracted files
+func (e *PXARExtractor) applyFileAttributes(path string) {
+	if e.currentEntry == nil {
+		return
+	}
+
+	// Apply permissions
+	mode := os.FileMode(e.currentEntry.Mode & 0777)
+	if err := os.Chmod(path, mode); err != nil {
+		// Non-fatal, just log
+		fmt.Printf("Warning: failed to set permissions for %s: %v\n", path, err)
+	}
+
+	// Apply timestamps
+	mtime := time.Unix(int64(e.currentEntry.MTime), int64(e.currentEntry.MTimeNs))
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		// Non-fatal, just log
+		fmt.Printf("Warning: failed to set timestamps for %s: %v\n", path, err)
+	}
+
+	// Try to apply ownership (usually fails for non-root)
+	_ = os.Chown(path, int(e.currentEntry.UID), int(e.currentEntry.GID))
+}
+
+// Helper functions
+
+// skipBytes skips n bytes in the reader
+func (e *PXARExtractor) skipBytes(n int64) error {
+	_, err := e.reader.Seek(n, io.SeekCurrent)
+	if err != nil {
+		// Fallback to reading if seek fails
+		_, err = io.CopyN(io.Discard, e.reader, n)
+	}
+	return err
+}
+
+
+// normalize filter paths
+func normalizeFilterPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	return strings.ToLower(filepath.Clean(path))
 }
