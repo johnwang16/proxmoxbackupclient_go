@@ -117,19 +117,6 @@ This client supports PBS-compatible client-side encryption with:
 - Master key support for key recovery
 - JSON key file format compatible with proxmox-backup-client
 
-## Native Go Cryptography
-
-This client uses **native Go cryptographic operations** for full PBS compatibility without external dependencies:
-
-- **Pure Go AES-256-GCM encryption** using `crypto/cipher.NewGCMWithNonceSize()` for 16-byte IV support
-- **Cross-platform support** (Windows, Linux, macOS) with no runtime dependencies
-- **No CGO required** - builds as a pure Go binary
-- **Simplified deployment** - single executable with no DLL/shared library requirements
-
-**For detailed technical information about the encryption implementation, see [Encryption.md](Encryption.md)**
-
-### Using Encryption
-
 To use encryption:
 1. Create an encryption key using `proxmox-backup-client key create` or any PBS-compatible tool
 2. Specify the key file path with `-encryption-key-path` parameter
@@ -141,26 +128,6 @@ Example with encryption:
 proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backupdir "C:\data" -encryption-key-path "backup.key" -encryption-password "mypass123"
 ```
 
-### Building
-
-The client can be built as a standard Go application:
-
-**Windows:**
-```cmd
-go build -o proxmoxbackupclient_go.exe .
-```
-
-Or use the provided build script:
-```cmd
-build.sh
-```
-
-**Linux/macOS:**
-```bash
-go build -o proxmoxbackupclient_go .
-```
-
-No special build flags or external libraries are required for encryption support.
 
 Restore Operations
 ==================
@@ -311,7 +278,4 @@ Known Issues
 ============
 
 Windows defender antimalware being active will slow backup down up to 25% of attainable speed 
-
-There's as of now no mechanism to prevent two instances being launched at same time which will screw up VSS and backup
-If you using windows planning utility it should theoretically prevent two instances starting at same time when originating from same job
 

@@ -550,7 +550,7 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 	
 	// Use configurable buffer for I/O throughput
 	bufferSizes := config.Performance.GetBufferSizes()
-	B := make([]byte, bufferSizes.StreamReadBuffer)
+	B := make([]byte, bufferSizes.ReadBuffer)
 	
 	// Stream backup processing
 	

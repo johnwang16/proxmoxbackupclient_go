@@ -118,8 +118,7 @@ func loadConfig() (*Config, bool, string) {
 	logLevelFlag := flag.String("log-level", DEFAULT_LOG_LEVEL, "Log level: info, performance, debug (default: info)")
 	
 	// Performance tuning flags
-	fileReadBufferFlag := flag.Int("file-read-buffer-mb", 0, "File read buffer size in MB (0=auto) (optional)")
-	streamReadBufferFlag := flag.Int("stream-read-buffer-mb", 0, "Stream read buffer size in MB (0=auto) (optional)")
+	readBufferFlag := flag.Int("read-buffer-mb", 0, "Read buffer size in MB for files and streams (default: 8MB if omitted)")
 	workerCountFlag := flag.Int("worker-count", 0, "Number of parallel workers (0=auto) (optional)")
 
 	// Restore flags
@@ -249,11 +248,10 @@ func loadConfig() (*Config, bool, string) {
 	}
 	
 	// Override performance settings from command line flags
-	if *fileReadBufferFlag > 0 {
-		config.Performance.FileReadBufferMB = *fileReadBufferFlag
-	}
-	if *streamReadBufferFlag > 0 {
-		config.Performance.StreamReadBufferMB = *streamReadBufferFlag
+	if *readBufferFlag > 0 {
+		config.Performance.ReadBufferMB = *readBufferFlag
+	} else if *readBufferFlag < 0 {
+		fmt.Printf("Error: read-buffer-mb must be positive (got %d), using default 8MB\n", *readBufferFlag)
 	}
 	if *workerCountFlag > 0 {
 		config.Performance.WorkerCount = *workerCountFlag

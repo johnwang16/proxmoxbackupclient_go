@@ -30,14 +30,9 @@
 
     "comment": "=== PERFORMANCE SETTINGS (optional, for optimization) ===",
     "performance": {
-        "file-read-buffer-mb": 16,
-        "stream-read-buffer-mb": 16,
-        "pxar-flush-buffer-mb": 16,
-        "pxar-threshold-mb": 32,
+        "read-buffer-mb": 16,
         "worker-count": 8,
-        "chunk-queue-depth": 64,
-        "chunk-size-mb": 4,
-        "enable-zero-copy": false
+        "chunk-size-mb": 4
     },
 
     "comment": "=== EMAIL NOTIFICATION SETTINGS (optional, mainly for backup) ===",

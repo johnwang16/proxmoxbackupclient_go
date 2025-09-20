@@ -13,9 +13,6 @@ import (
 	"github.com/cornelk/hashmap"
 )
 
-// No mutex needed - cornelk/hashmap is lock-free and thread-safe!
-// This was a major bottleneck that limited us to single-threaded deduplication
-
 // ChunkProcessJob represents a job for parallel chunk processing
 type ChunkProcessJob struct {
 	chunkData  []byte
@@ -128,7 +125,6 @@ func (c *ParallelChunkState) InitWithConfig(newchunk *atomic.Uint64, reusechunk 
 func (c *ParallelChunkState) StartParallel(client *PBSClient) {
 	c.client = client
 
-	// Create unbuffered channels - workers provide the parallelism, not queue depth
 	// Buzhash is sequential anyway, so buffering doesn't help
 	c.processQueue = make(chan ChunkProcessJob)
 	c.processResult = make(chan ChunkProcessResult)
@@ -161,7 +157,7 @@ func (c *ParallelChunkState) processWorker() {
 		// Compute hash once and use for both dedup check and final result
 		bindigest, shahash := c.computeChunkDigestThreadSafe(job.chunkData, c.cryptConfig)
 		
-		// Lock-free read from concurrent hashmap - this is the key performance fix!
+		// Lock-free read from concurrent hashmap
 		_, exists := c.knownChunks.Get(shahash)
 
 		if exists {
@@ -305,7 +301,6 @@ func (c *ParallelChunkState) uploadWorker() {
 	for result := range c.uploadQueue {
 		if result.isNew && result.chunkData != nil {
 			// Final atomic check-and-set before upload using lock-free GetOrInsert
-			// cornelk/hashmap GetOrInsert is atomic and lock-free - no mutex needed!
 			_, alreadyExists := c.knownChunks.GetOrInsert(result.shahash, true)
 
 			if !alreadyExists {
@@ -323,9 +318,8 @@ func (c *ParallelChunkState) uploadWorker() {
 
 				if err != nil {
 					// Handle "already exists" as edge case recovery
-					if strings.Contains(err.Error(), "Overwriting existing") || 
-					   strings.Contains(err.Error(), "already exists") ||
-					   strings.Contains(err.Error(), "already exist") {
+					if strings.Contains(err.Error(), "Overwriting existing") ||
+					   strings.Contains(err.Error(), "already exists") {
 						if c.config != nil && c.config.ShouldLogDebug() {
 							fmt.Printf("Chunk already exists on server (race recovery): %s\n", result.shahash)
 						}

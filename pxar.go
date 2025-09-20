@@ -181,12 +181,7 @@ type PXARArchive struct {
 
 func (a *PXARArchive) Flush() {
 
-	// Use configurable buffer size for optimal performance
-	bufferSize := DEFAULT_BUFFER_SIZE // Default fallback
-	if a.perfConfig != nil {
-		bufferSize = a.perfConfig.GetBufferSizes().PXARFlushBuffer
-	}
-	b := make([]byte, bufferSize)
+	b := make([]byte, 64*1024)
 	for {
 		count, _ := a.buffer.Read(b)
 		if count <= 0 {
@@ -489,7 +484,7 @@ func (a *PXARArchive) WriteFile(path string, basename string) CatalogFile {
 	// Use configurable buffer for file reading
 	bufferSize := DEFAULT_BUFFER_SIZE // Default fallback
 	if a.perfConfig != nil {
-		bufferSize = a.perfConfig.GetBufferSizes().FileReadBuffer
+		bufferSize = a.perfConfig.GetBufferSizes().ReadBuffer
 	}
 	readbuffer := make([]byte, bufferSize)
 
