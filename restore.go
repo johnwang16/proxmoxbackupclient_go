@@ -10,98 +10,47 @@ import (
 	"time"
 )
 
+
 // restoreBackup restores a generic PBS archive to a file
 func restoreBackup(client *PBSClient, archiveName string, outputPath string, cryptConfig *CryptConfig, snapshotTime string) error {
 	fmt.Printf("Starting restore of %s to %s\n", archiveName, outputPath)
-	
+
 	// First connect with standard HTTP client to list snapshots
 	client.ConnectRestore()
-	
+
 	// Resolve snapshot
-	snapshots, err := client.ListSnapshots()
+	selectedSnapshot, err := resolveSnapshot(client, snapshotTime)
 	if err != nil {
-		return fmt.Errorf("failed to list snapshots: %v", err)
+		return err
 	}
-	
-	var selectedSnapshot *BackupSnapshot
-	
-	if snapshotTime == "latest" || snapshotTime == "" {
-		// Find the latest snapshot for this backup ID
-		var latestTime int64 = 0
-		for _, snapshot := range snapshots {
-			if snapshot.BackupID == client.manifest.BackupID && snapshot.BackupTime > latestTime {
-				latestTime = snapshot.BackupTime
-				selectedSnapshot = &snapshot
-			}
-		}
-	} else {
-		// Parse timestamp - expecting Unix timestamp as string (e.g., "1704110400")
-		var targetTime int64
-		_, err := fmt.Sscanf(snapshotTime, "%d", &targetTime)
-		if err != nil {
-			// Try parsing as RFC3339 time format
-			parsedTime, err2 := time.Parse(time.RFC3339, snapshotTime)
-			if err2 != nil {
-				return fmt.Errorf("invalid snapshot time format: %s (expected Unix timestamp or RFC3339)", snapshotTime)
-			}
-			targetTime = parsedTime.Unix()
-		}
-		
-		// Find exact matching snapshot
-		for _, snapshot := range snapshots {
-			if snapshot.BackupID == client.manifest.BackupID && snapshot.BackupTime == targetTime {
-				selectedSnapshot = &snapshot
-				break
-			}
-		}
-	}
-	
-	if selectedSnapshot == nil {
-		return fmt.Errorf("no matching snapshot found for backup ID: %s", client.manifest.BackupID)
-	}
-	
+
 	fmt.Printf("Selected snapshot: %s at %d\n", selectedSnapshot.BackupID, selectedSnapshot.BackupTime)
 	
 	// Switch to reader protocol for data access
 	err = client.ConnectReader(selectedSnapshot.BackupType, selectedSnapshot.BackupID, selectedSnapshot.BackupTime)
 	if err != nil {
-		return fmt.Errorf("failed to establish reader connection: %v", err)
+		return fmt.Errorf("failed to establish reader connection: %w", err)
 	}
 	
 	// Download the dynamic index using reader protocol
 	didxData, err := client.DownloadFile(archiveName)
 	if err != nil {
-		return fmt.Errorf("failed to download archive index: %v", err)
+		return fmt.Errorf("failed to download archive index: %w", err)
 	}
-	
+
 	fmt.Printf("Downloaded DIDX: %d bytes\n", len(didxData))
-	
-	if !bytes.HasPrefix(didxData, DIDX_MAGIC) {
-		return fmt.Errorf("invalid DIDX magic bytes")
-	}
-	
-	// Parse the DIDX entries (skip 4096 byte header)
-	didxEntries := didxData[4096:]
-	var chunks []DidxEntry
-	
-	
-	for i := 0; i*40 < len(didxEntries); i++ {
-		if i*40+40 > len(didxEntries) {
-			break
-		}
-		entry := DidxEntry{
-			offset: binary.LittleEndian.Uint64(didxEntries[i*40 : i*40+8]),
-			digest: make([]byte, 32),
-		}
-		copy(entry.digest, didxEntries[i*40+8:i*40+40])
-		chunks = append(chunks, entry)
+
+	// Parse DIDX entries
+	chunks, err := parseDidxEntries(didxData)
+	if err != nil {
+		return fmt.Errorf("failed to parse DIDX: %w", err)
 	}
 	
 	
 	// Create output file
 	outFile, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("failed to create output file: %v", err)
+		return fmt.Errorf("failed to create output file: %w", err)
 	}
 	defer outFile.Close()
 	
@@ -115,13 +64,13 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 		// Download chunk data (DataBlob format) using backup protocol
 		chunkDataBlob, err := client.DownloadChunk(digestHex)
 		if err != nil {
-			return fmt.Errorf("failed to download chunk %s: %v", digestHex, err)
+			return fmt.Errorf("failed to download chunk %s: %w", digestHex, err)
 		}
 		
 		// Decode DataBlob with digest validation for data integrity
 		plaintext, err := DecodeDataBlobWithDigest(chunkDataBlob, cryptConfig, chunk.digest)
 		if err != nil {
-			return fmt.Errorf("failed to decode chunk %s: %v", digestHex, err)
+			return fmt.Errorf("failed to decode chunk %s: %w", digestHex, err)
 		}
 		
 		if uint64(len(plaintext)) != chunkSize {
@@ -131,7 +80,7 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 		// Write to output file
 		n, err := outFile.Write(plaintext)
 		if err != nil {
-			return fmt.Errorf("failed to write chunk data: %v", err)
+			return fmt.Errorf("failed to write chunk data: %w", err)
 		}
 		if n != len(plaintext) {
 			return fmt.Errorf("incomplete write: wrote %d bytes, expected %d", n, len(plaintext))
@@ -143,7 +92,7 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 		// Flush after each chunk for large files
 		err = outFile.Sync()
 		if err != nil {
-			return fmt.Errorf("failed to sync chunk data: %v", err)
+			return fmt.Errorf("failed to sync chunk data: %w", err)
 		}
 	}
 	
@@ -158,7 +107,7 @@ func restorePXAR(client *PBSClient, outputDir string, cryptConfig *CryptConfig, 
 	// Create output directory if it doesn't exist
 	err := os.MkdirAll(outputDir, 0755)
 	if err != nil {
-		return fmt.Errorf("failed to create output directory: %v", err)
+		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 	
 	if restorePath != "" {
@@ -170,14 +119,14 @@ func restorePXAR(client *PBSClient, outputDir string, cryptConfig *CryptConfig, 
 	// Create streaming restore reader
 	pxarReader, err := createRestoreReader(client, archiveName, cryptConfig, snapshotTime)
 	if err != nil {
-		return fmt.Errorf("failed to create restore stream: %v", err)
+		return fmt.Errorf("failed to create restore stream: %w", err)
 	}
 	defer pxarReader.Close()
 	
 	// Use native PXAR extraction directly from stream
 	err = ExtractPXARFromReader(pxarReader, outputDir, restorePath)
 	if err != nil {
-		return fmt.Errorf("PXAR extraction failed: %v", err)
+		return fmt.Errorf("PXAR extraction failed: %w", err)
 	}
 	
 	fmt.Printf("Files extracted to: %s\n", outputDir)
@@ -303,13 +252,13 @@ func (r *RestoreReader) loadDataForPosition(pos int64) error {
 	digestHex := hex.EncodeToString(r.chunks[chunkIndex].digest)
 	chunkDataBlob, err := r.client.DownloadChunk(digestHex)
 	if err != nil {
-		return fmt.Errorf("failed to download chunk %s: %v", digestHex, err)
+		return fmt.Errorf("failed to download chunk %s: %w", digestHex, err)
 	}
 	
 	// Decode DataBlob with digest validation for data integrity
 	plaintext, err := DecodeDataBlobWithDigest(chunkDataBlob, r.cryptConfig, r.chunks[chunkIndex].digest)
 	if err != nil {
-		return fmt.Errorf("failed to decode chunk %s: %v", digestHex, err)
+		return fmt.Errorf("failed to decode chunk %s: %w", digestHex, err)
 	}
 	
 	// Store the chunk data and its offset
@@ -329,15 +278,57 @@ func (r *RestoreReader) loadDataForPosition(pos int64) error {
 func createRestoreReader(client *PBSClient, archiveName string, cryptConfig *CryptConfig, snapshotTime string) (*RestoreReader, error) {
 	// First connect with standard HTTP client to list snapshots
 	client.ConnectRestore()
-	
+
 	// Resolve snapshot
-	snapshots, err := client.ListSnapshots()
+	selectedSnapshot, err := resolveSnapshot(client, snapshotTime)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list snapshots: %v", err)
+		return nil, err
+	}
+
+	fmt.Printf("Selected snapshot: %s at %d\n", selectedSnapshot.BackupID, selectedSnapshot.BackupTime)
+	
+	// Switch to reader protocol for data access
+	err = client.ConnectReader(selectedSnapshot.BackupType, selectedSnapshot.BackupID, selectedSnapshot.BackupTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to establish reader connection: %w", err)
 	}
 	
-	var selectedSnapshot *BackupSnapshot
+	// Download the dynamic index using reader protocol
+	didxData, err := client.DownloadFile(archiveName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download archive index: %w", err)
+	}
+
+	fmt.Printf("Downloaded DIDX: %d bytes\n", len(didxData))
+
+	// Parse DIDX entries
+	chunks, err := parseDidxEntries(didxData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DIDX: %w", err)
+	}
 	
+	
+	return &RestoreReader{
+		client:      client,
+		cryptConfig: cryptConfig,
+		chunks:      chunks,
+		currentPos:  0,
+		totalSize:   -1, // Initialize as uncalculated
+		totalChunks: len(chunks),
+	}, nil
+}
+
+// Helper functions
+
+// resolveSnapshot finds the appropriate snapshot based on backup ID and time criteria
+func resolveSnapshot(client *PBSClient, snapshotTime string) (*BackupSnapshot, error) {
+	snapshots, err := client.ListSnapshots()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list snapshots: %w", err)
+	}
+
+	var selectedSnapshot *BackupSnapshot
+
 	if snapshotTime == "latest" || snapshotTime == "" {
 		// Find the latest snapshot for this backup ID
 		var latestTime int64 = 0
@@ -359,7 +350,7 @@ func createRestoreReader(client *PBSClient, archiveName string, cryptConfig *Cry
 			}
 			targetTime = parsedTime.Unix()
 		}
-		
+
 		// Find exact matching snapshot
 		for _, snapshot := range snapshots {
 			if snapshot.BackupID == client.manifest.BackupID && snapshot.BackupTime == targetTime {
@@ -368,55 +359,39 @@ func createRestoreReader(client *PBSClient, archiveName string, cryptConfig *Cry
 			}
 		}
 	}
-	
+
 	if selectedSnapshot == nil {
 		return nil, fmt.Errorf("no matching snapshot found for backup ID: %s", client.manifest.BackupID)
 	}
-	
-	fmt.Printf("Selected snapshot: %s at %d\n", selectedSnapshot.BackupID, selectedSnapshot.BackupTime)
-	
-	// Switch to reader protocol for data access
-	err = client.ConnectReader(selectedSnapshot.BackupType, selectedSnapshot.BackupID, selectedSnapshot.BackupTime)
-	if err != nil {
-		return nil, fmt.Errorf("failed to establish reader connection: %v", err)
-	}
-	
-	// Download the dynamic index using reader protocol
-	didxData, err := client.DownloadFile(archiveName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to download archive index: %v", err)
-	}
-	
-	fmt.Printf("Downloaded DIDX: %d bytes\n", len(didxData))
-	
+
+	return selectedSnapshot, nil
+}
+
+// parseDidxEntries parses DIDX data and returns chunk entries
+func parseDidxEntries(didxData []byte) ([]DidxEntry, error) {
 	if !bytes.HasPrefix(didxData, DIDX_MAGIC) {
 		return nil, fmt.Errorf("invalid DIDX magic bytes")
 	}
-	
-	// Parse the DIDX entries (skip 4096 byte header)
-	didxEntries := didxData[4096:]
+
+	// Parse the DIDX entries (skip header)
+	didxEntries := didxData[DIDX_HEADER_SIZE:]
 	var chunks []DidxEntry
-	
-	
-	for i := 0; i*40 < len(didxEntries); i++ {
-		if i*40+40 > len(didxEntries) {
+
+	for i := 0; i*DIDX_ENTRY_SIZE < len(didxEntries); i++ {
+		entryStart := i * DIDX_ENTRY_SIZE
+		entryEnd := entryStart + DIDX_ENTRY_SIZE
+
+		if entryEnd > len(didxEntries) {
 			break
 		}
+
 		entry := DidxEntry{
-			offset: binary.LittleEndian.Uint64(didxEntries[i*40 : i*40+8]),
+			offset: binary.LittleEndian.Uint64(didxEntries[entryStart : entryStart+8]),
 			digest: make([]byte, 32),
 		}
-		copy(entry.digest, didxEntries[i*40+8:i*40+40])
+		copy(entry.digest, didxEntries[entryStart+8:entryEnd])
 		chunks = append(chunks, entry)
 	}
-	
-	
-	return &RestoreReader{
-		client:      client,
-		cryptConfig: cryptConfig,
-		chunks:      chunks,
-		currentPos:  0,
-		totalSize:   -1, // Initialize as uncalculated
-		totalChunks: len(chunks),
-	}, nil
+
+	return chunks, nil
 }
