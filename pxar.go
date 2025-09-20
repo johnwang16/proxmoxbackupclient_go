@@ -7,12 +7,11 @@ import (
 	"io"
 	"math/bits"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
-
-	//	"io/ioutil"
-	"path/filepath"
 
 	"github.com/dchest/siphash"
 )
@@ -488,52 +487,44 @@ func (a *PXARArchive) WriteFile(path string, basename string) CatalogFile {
 	}
 	readbuffer := make([]byte, bufferSize)
 
-	// Track async processing for synchronization
-	readCount := 0
-	streamCount := 0
-	
-	// File processing started
+	// Use WaitGroup for synchronization
+	var wg sync.WaitGroup
 
 	// Create async pipeline channel with buffer depth for optimal overlap
 	pipelineDepth := 4 // Allow 4 buffers in pipeline
 	streamChan := make(chan []byte, pipelineDepth)
-	
+
 	// Start async streaming goroutine
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for data := range streamChan {
 			a.writeCB(data)
-			streamCount++
 		}
 	}()
 
 	for {
 		nread, err := file.Read(readbuffer)
-		
+
 		if nread <= 0 {
 			break
 		}
 		if err != nil {
 			panic(err.Error())
 		}
-		
-		// Track read count for async synchronization
-		readCount++
+
 		a.pos += uint64(nread)
-		
+
 		// Send data to async streaming pipeline (non-blocking with buffer)
 		// Make a copy since we're reusing readbuffer
 		data := make([]byte, nread)
 		copy(data, readbuffer[:nread])
 		streamChan <- data
 	}
-	
+
 	// Close channel and wait for streaming to complete
 	close(streamChan)
-	
-	// Give streaming goroutine time to finish processing
-	for streamCount < readCount {
-		time.Sleep(1 * time.Millisecond)
-	}
+	wg.Wait()
 
 	// File processing complete
 
