@@ -416,9 +416,8 @@ func (pbs *PBSClient) ConnectRestore() {
 		InsecureSkipVerify: pbs.insecure,
 	}
 	
-	// Only validate certificate fingerprint if not in insecure mode AND fingerprint is provided
-	if !pbs.insecure && pbs.certfingerprint != "" {
-		pbs.tlsConfig.InsecureSkipVerify = true // Skip CA validation to use custom fingerprint validation
+	// use custom validation instead of CA validation
+	if pbs.insecure {
 		pbs.tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 			// Extract the peer certificate
 			if len(rawCerts) == 0 {
@@ -502,9 +501,8 @@ func (pbs *PBSClient) Connect(reader bool) {
 		InsecureSkipVerify: pbs.insecure,
 	}
 	
-	// Only validate certificate fingerprint if not in insecure mode AND fingerprint is provided
-	if !pbs.insecure && pbs.certfingerprint != "" {
-		pbs.tlsConfig.InsecureSkipVerify = true // Skip CA validation to use custom fingerprint validation
+	// use custom validation instead of CA validation
+	if pbs.insecure {
 		pbs.tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 			// Extract the peer certificate
 			if len(rawCerts) == 0 {
