@@ -3,23 +3,18 @@ package main
 import "fmt"
 
 // Log levels
-const (
-	LogLevelInfo        = "info"
-	LogLevelPerformance = "performance" 
-	LogLevelDebug       = "debug"
-)
 
 // Helper functions for different log levels
 func (c *Config) ShouldLogInfo() bool {
-	return c.LogLevel == LogLevelInfo || c.LogLevel == LogLevelPerformance || c.LogLevel == LogLevelDebug
+	return c.LogLevel == LOG_LEVEL_INFO || c.LogLevel == LOG_LEVEL_PERFORMANCE || c.LogLevel == LOG_LEVEL_DEBUG
 }
 
 func (c *Config) ShouldLogPerformance() bool {
-	return c.LogLevel == LogLevelPerformance || c.LogLevel == LogLevelDebug
+	return c.LogLevel == LOG_LEVEL_PERFORMANCE || c.LogLevel == LOG_LEVEL_DEBUG
 }
 
 func (c *Config) ShouldLogDebug() bool {
-	return c.LogLevel == LogLevelDebug
+	return c.LogLevel == LOG_LEVEL_DEBUG
 }
 
 // Convenience logging functions
@@ -44,6 +39,6 @@ func (c *Config) LogDebug(format string, args ...interface{}) {
 // Initialize default log level if not set
 func (c *Config) InitializeLogLevel() {
 	if c.LogLevel == "" {
-		c.LogLevel = LogLevelInfo
+		c.LogLevel = LOG_LEVEL_INFO
 	}
 }

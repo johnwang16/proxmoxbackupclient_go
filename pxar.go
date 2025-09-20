@@ -17,26 +17,6 @@ import (
 )
 
 
-const (
-	PXAR_ENTRY               uint64 = 0xd5956474e588acef
-	PXAR_ENTRY_V1            uint64 = 0x11da850a1c1cceff
-	PXAR_FILENAME            uint64 = 0x16701121063917b3
-	PXAR_SYMLINK             uint64 = 0x27f971e7dbf5dc5f
-	PXAR_DEVICE              uint64 = 0x9fc9e906586d5ce9
-	PXAR_XATTR               uint64 = 0x0dab0229b57dcd03
-	PXAR_ACL_USER            uint64 = 0x2ce8540a457d55b8
-	PXAR_ACL_GROUP           uint64 = 0x136e3eceb04c03ab
-	PXAR_ACL_GROUP_OBJ       uint64 = 0x10868031e9582876
-	PXAR_ACL_DEFAULT         uint64 = 0xbbbb13415a6896f5
-	PXAR_ACL_DEFAULT_USER    uint64 = 0xc89357b40532cd1f
-	PXAR_ACL_DEFAULT_GROUP   uint64 = 0xf90a8a5816038ffe
-	PXAR_FCAPS               uint64 = 0x2da9dd9db5f7fb67
-	PXAR_QUOTA_PROJID        uint64 = 0xe07540e82f7d1cbb
-	PXAR_HARDLINK            uint64 = 0x51269c8422bd7275
-	PXAR_PAYLOAD             uint64 = 0x28147a1b0b7c1a25
-	PXAR_GOODBYE             uint64 = 0x2fec4fa642d5731d
-	PXAR_GOODBYE_TAIL_MARKER uint64 = 0xef5eed5b753e1555
-)
 
 // Magic bytes moved to constants.go
 
@@ -57,20 +37,6 @@ type PXAREntry struct {
 	_        uint32 // padding
 }
 
-const (
-	IFMT   uint64 = 0o0170000
-	IFSOCK uint64 = 0o0140000
-	IFLNK  uint64 = 0o0120000
-	IFREG  uint64 = 0o0100000
-	IFBLK  uint64 = 0o0060000
-	IFDIR  uint64 = 0o0040000
-	IFCHR  uint64 = 0o0020000
-	IFIFO  uint64 = 0o0010000
-
-	ISUID uint64 = 0o0004000
-	ISGID uint64 = 0o0002000
-	ISVTX uint64 = 0o0001000
-)
 
 type MTime struct {
 	secs    uint64
@@ -537,10 +503,6 @@ func (a *PXARArchive) WriteFile(path string, basename string) CatalogFile {
 	}
 }
 
-const (
-	PXAR_HEADER_MIN_SIZE   = 16
-	PXAR_ENTRY_STRUCT_SIZE = 40
-)
 
 // PXARExtractor encapsulates all extraction state
 type PXARExtractor struct {

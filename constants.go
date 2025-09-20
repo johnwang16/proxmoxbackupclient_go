@@ -37,6 +37,49 @@ const (
 
 	// Default log level
 	DEFAULT_LOG_LEVEL = "info"
+
+	// PXAR constants
+	PXAR_HEADER_MIN_SIZE   = 16
+	PXAR_ENTRY_STRUCT_SIZE = 40
+
+	// File mode constants (Unix file types and permissions)
+	IFMT   uint64 = 0o0170000 // File type mask
+	IFSOCK uint64 = 0o0140000 // Socket
+	IFLNK  uint64 = 0o0120000 // Symbolic link
+	IFREG  uint64 = 0o0100000 // Regular file
+	IFBLK  uint64 = 0o0060000 // Block device
+	IFDIR  uint64 = 0o0040000 // Directory
+	IFCHR  uint64 = 0o0020000 // Character device
+	IFIFO  uint64 = 0o0010000 // FIFO
+
+	ISUID uint64 = 0o0004000 // Set user ID
+	ISGID uint64 = 0o0002000 // Set group ID
+	ISVTX uint64 = 0o0001000 // Sticky bit
+
+	// Log level constants
+	LOG_LEVEL_INFO        = "info"
+	LOG_LEVEL_PERFORMANCE = "performance"
+	LOG_LEVEL_DEBUG       = "debug"
+
+	// PXAR entry type constants
+	PXAR_ENTRY               uint64 = 0xd5956474e588acef
+	PXAR_ENTRY_V1            uint64 = 0x11da850a1c1cceff
+	PXAR_FILENAME            uint64 = 0x16701121063917b3
+	PXAR_SYMLINK             uint64 = 0x27f971e7dbf5dc5f
+	PXAR_DEVICE              uint64 = 0x9fc9e906586d5ce9
+	PXAR_XATTR               uint64 = 0x0dab0229b57dcd03
+	PXAR_ACL_USER            uint64 = 0x2ce8540a457d55b8
+	PXAR_ACL_GROUP           uint64 = 0x136e3eceb04c03ab
+	PXAR_ACL_GROUP_OBJ       uint64 = 0x10868031e9582876
+	PXAR_ACL_DEFAULT         uint64 = 0xbbbb13415a6896f5
+	PXAR_ACL_DEFAULT_USER    uint64 = 0xc89357b40532cd1f
+	PXAR_ACL_DEFAULT_GROUP   uint64 = 0xf90a8a5816038ffe
+	PXAR_FCAPS               uint64 = 0x2da9dd9db5f7fb67
+	PXAR_QUOTA_PROJID        uint64 = 0xe07540e82f7d1cbb
+	PXAR_HARDLINK            uint64 = 0x51269c8422bd7275
+	PXAR_PAYLOAD             uint64 = 0x28147a1b0b7c1a25
+	PXAR_GOODBYE             uint64 = 0x2fec4fa642d5731d
+	PXAR_GOODBYE_TAIL_MARKER uint64 = 0xef5eed5b753e1555
 )
 
 // Magic byte arrays for various file formats and protocols
