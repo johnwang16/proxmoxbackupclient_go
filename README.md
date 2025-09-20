@@ -77,7 +77,7 @@ proxmoxbackupgo.exe
 ```
 
 For JSON configuration, a comprehensive example is provided:
-- `config.example.json` - Complete configuration with all possible settings for backup, restore, encryption, performance tuning, and email notifications
+- `config.json.example` - Complete configuration with all possible settings for backup, restore, encryption, performance tuning, and email notifications
 
 This single configuration file demonstrates all available options and can be used for any operation mode. Simply fill in the needed fields and leave others empty or with default values.
 
@@ -220,7 +220,7 @@ proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secr
 
 The same config file can contain both backup and restore settings. Use the `-restore` flag to switch modes:
 
-**Example config file (config.example.json):**
+**Example config file (config.json.example):**
 ```json
 {
   "baseurl": "https://pbs.example.com:8007",
@@ -245,22 +245,22 @@ The same config file can contain both backup and restore settings. Use the `-res
 
 **For backup mode:**
 ```shell
-proxmoxbackupgo.exe -config config.example.json
+proxmoxbackupgo.exe -config config.json.example
 ```
 
 **For restore mode (same config file):**
 ```shell
-proxmoxbackupgo.exe -config config.example.json -restore "*"
+proxmoxbackupgo.exe -config config.json.example -restore "*"
 ```
 
 **Restore specific path:**
 ```shell
-proxmoxbackupgo.exe -config config.example.json -restore "Documents/folder"
+proxmoxbackupgo.exe -config config.json.example -restore "Documents/folder"
 ```
 
 **Override config values:**
 ```shell
-proxmoxbackupgo.exe -config config.example.json -restore "*" -restore-output "D:\\different-location"
+proxmoxbackupgo.exe -config config.json.example -restore "*" -restore-output "D:\\different-location"
 ```
 
 
