@@ -89,7 +89,7 @@ func (c *ParallelChunkState) InitWithConfig(newchunk *atomic.Uint64, reusechunk 
 	if cryptConfig != nil {
 		// Reduce chunk size to account for encryption overhead (28 bytes for AES-GCM)
 		// Use safety margin to ensure max chunks stay under PBS 16MB limit
-		chunkAvgSize = uint64(DEFAULT_CHUNK_SIZE - 100)
+		chunkAvgSize = uint64(DEFAULT_CHUNK_SIZE - ENCRYPTION_SAFETY_MARGIN)
 	}
 	c.C = Chunker{}
 	c.C.New(chunkAvgSize)
@@ -358,14 +358,7 @@ func (c *ParallelChunkState) HandleData(b []byte) {
 			c.current_chunk = append(c.current_chunk, b[:chunkpos]...)
 
 			// Submit chunk for parallel processing using pooled buffer
-			pooledBuffer := c.bufferPool.Get().([]byte)
-			// Ensure buffer has enough capacity, grow if needed
-			if cap(pooledBuffer) < len(c.current_chunk) {
-				pooledBuffer = make([]byte, 0, len(c.current_chunk))
-			}
-			// Reset length and copy data
-			pooledBuffer = pooledBuffer[:len(c.current_chunk)]
-			copy(pooledBuffer, c.current_chunk)
+			pooledBuffer := c.getPooledBuffer(c.current_chunk)
 			
 			job := ChunkProcessJob{
 				chunkData:  pooledBuffer,
@@ -392,14 +385,7 @@ func (c *ParallelChunkState) HandleData(b []byte) {
 func (c *ParallelChunkState) Eof() {
 	// Process any remaining data using pooled buffer
 	if len(c.current_chunk) > 0 {
-		pooledBuffer := c.bufferPool.Get().([]byte)
-		// Ensure buffer has enough capacity, grow if needed
-		if cap(pooledBuffer) < len(c.current_chunk) {
-			pooledBuffer = make([]byte, 0, len(c.current_chunk))
-		}
-		// Reset length and copy data
-		pooledBuffer = pooledBuffer[:len(c.current_chunk)]
-		copy(pooledBuffer, c.current_chunk)
+		pooledBuffer := c.getPooledBuffer(c.current_chunk)
 		
 		job := ChunkProcessJob{
 			chunkData:  pooledBuffer,
@@ -425,8 +411,8 @@ func (c *ParallelChunkState) Eof() {
 
 	// Send chunk assignments to server
 	// Avoid incurring in request entity too large by chunking assignment PUT requests
-	for k := 0; k < len(c.assignments); k += 128 {
-		k2 := k + 128
+	for k := 0; k < len(c.assignments); k += CHUNK_ASSIGNMENT_BATCH_SIZE {
+		k2 := k + CHUNK_ASSIGNMENT_BATCH_SIZE
 		if k2 > len(c.assignments) {
 			k2 = len(c.assignments)
 		}
@@ -436,4 +422,19 @@ func (c *ParallelChunkState) Eof() {
 	// Close the dynamic index
 	digest := hex.EncodeToString(c.chunkdigests.Sum(nil))
 	c.client.CloseDynamicIndex(c.wrid, digest, c.pos, c.chunkcount)
+}
+
+// Helper functions
+
+// getPooledBuffer gets a buffer from the pool and copies data into it
+func (c *ParallelChunkState) getPooledBuffer(data []byte) []byte {
+	pooledBuffer := c.bufferPool.Get().([]byte)
+	// Ensure buffer has enough capacity, grow if needed
+	if cap(pooledBuffer) < len(data) {
+		pooledBuffer = make([]byte, 0, len(data))
+	}
+	// Reset length and copy data
+	pooledBuffer = pooledBuffer[:len(data)]
+	copy(pooledBuffer, data)
+	return pooledBuffer
 }
