@@ -107,17 +107,16 @@ func (c *ChunkState) HandleData(b []byte, client *PBSClient){
 			var shahash string
 			
 			if c.cryptConfig != nil {
+				// For encrypted chunks: digest on plaintext before encryption
+				bindigest, shahash = c.computeChunkDigest(c.current_chunk)
+
+				// Then create the encrypted DataBlob
 				var err error
-				
-				// First create the encrypted DataBlob (this determines what data gets encrypted)
 				chunkData, err = c.cryptConfig.EncodeDataBlob(c.current_chunk, true)
 				if err != nil {
 					fmt.Printf("DataBlob encoding failed: %v\n", err)
 					return
 				}
-				
-				// Calculate digest on the exact data that was encrypted (stored in lastDigestData)
-				bindigest, shahash = c.computeChunkDigest(c.cryptConfig.lastDigestData)
 			} else {
 				// Unencrypted chunks - digest on original data
 				bindigest, shahash = c.computeChunkDigest(c.current_chunk)
@@ -168,17 +167,16 @@ func (c *ChunkState) Eof(client *PBSClient) {
 		var shahash string
 		
 		if c.cryptConfig != nil {
+			// For encrypted chunks: digest on plaintext before encryption
+			bindigest, shahash = c.computeChunkDigest(c.current_chunk)
+
+			// Then create the encrypted DataBlob
 			var err error
-			
-			// First create the encrypted DataBlob (this determines what data gets encrypted)
 			chunkData, err = c.cryptConfig.EncodeDataBlob(c.current_chunk, true)
 			if err != nil {
 				fmt.Printf("DataBlob encoding failed: %v\n", err)
 				return
 			}
-			
-			// Calculate digest on the exact data that was encrypted (stored in lastDigestData)
-			bindigest, shahash = c.computeChunkDigest(c.cryptConfig.lastDigestData)
 		} else {
 			// Unencrypted chunks - digest on original data
 			bindigest, shahash = c.computeChunkDigest(c.current_chunk)

@@ -17,12 +17,19 @@ const (
 	// DIDX_ENTRY_SIZE is the size of a dynamic index entry: 8 bytes offset + 32 bytes SHA256 digest
 	DIDX_ENTRY_SIZE = 40
 
+	// DIDX_HEADER_SIZE is the size of the DIDX header before entries
+	DIDX_HEADER_SIZE = 4096
+
 	// MUTEX_NAME is used for Windows single instance locking
 	MUTEX_NAME = "proxmoxbackupclient_go"
 
 	// Buffer sizes in bytes
 	COPY_BUFFER_SIZE = 32 * 1024 // 32KB for file copy operations
 	BUFFER_POOL_SIZE = 8 * 1024 * 1024 // 8MB for buffer pool capacity
+
+	// Chunk processing constants
+	CHUNK_ASSIGNMENT_BATCH_SIZE = 128 // Number of chunks to assign per request
+	ENCRYPTION_SAFETY_MARGIN = 100    // Bytes to reduce from chunk size for encryption overhead
 
 	// Archive and file extensions
 	PXAR_ARCHIVE_NAME = "backup.pxar.didx"

@@ -412,36 +412,7 @@ func (pbs *PBSClient) UploadRawChunk(writerid uint64, digest string, chunkdata [
 
 func (pbs *PBSClient) ConnectRestore() {
 	// For restore operations, use a standard HTTP client without protocol upgrade
-	pbs.tlsConfig = tls.Config{
-		InsecureSkipVerify: pbs.insecure,
-	}
-	
-	// use custom validation instead of CA validation
-	if pbs.insecure {
-		pbs.tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			// Extract the peer certificate
-			if len(rawCerts) == 0 {
-				return fmt.Errorf("no certificates presented by the peer")
-			}
-			peerCert, err := x509.ParseCertificate(rawCerts[0])
-			if err != nil {
-				return fmt.Errorf("failed to parse certificate: %v", err)
-			}
-
-			// Calculate the SHA-256 fingerprint of the certificate
-			expectedFingerprint := strings.ToLower(strings.ReplaceAll(pbs.certfingerprint, ":", ""))
-			calculatedFingerprint := sha256.Sum256(peerCert.Raw)
-			calculatedFingerprintStr := strings.ToLower(hex.EncodeToString(calculatedFingerprint[:]))
-
-			// Compare the calculated fingerprint with the expected one (case-insensitive)
-			if calculatedFingerprintStr != expectedFingerprint {
-				return fmt.Errorf("certificate fingerprint does not match (%s,%s)", expectedFingerprint, calculatedFingerprintStr)
-			}
-
-			// If the fingerprint matches, the certificate is considered valid
-			return nil
-		}
-	}
+	pbs.setupTLSConfig()
 
 	// Standard HTTP client for REST API calls
 	pbs.client = http.Client{
@@ -497,36 +468,7 @@ func (pbs *PBSClient) DownloadFile(filename string) ([]byte, error) {
 
 func (pbs *PBSClient) Connect(reader bool) {
 	pbs.writersManifest = make(map[uint64]int)
-	pbs.tlsConfig = tls.Config{
-		InsecureSkipVerify: pbs.insecure,
-	}
-	
-	// use custom validation instead of CA validation
-	if pbs.insecure {
-		pbs.tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			// Extract the peer certificate
-			if len(rawCerts) == 0 {
-				return fmt.Errorf("no certificates presented by the peer")
-			}
-			peerCert, err := x509.ParseCertificate(rawCerts[0])
-			if err != nil {
-				return fmt.Errorf("failed to parse certificate: %v", err)
-			}
-
-			// Calculate the SHA-256 fingerprint of the certificate
-			expectedFingerprint := strings.ToLower(strings.ReplaceAll(pbs.certfingerprint, ":", ""))
-			calculatedFingerprint := sha256.Sum256(peerCert.Raw)
-			calculatedFingerprintStr := strings.ToLower(hex.EncodeToString(calculatedFingerprint[:]))
-
-			// Compare the calculated fingerprint with the expected one (case-insensitive)
-			if calculatedFingerprintStr != expectedFingerprint {
-				return fmt.Errorf("certificate fingerprint does not match (%s,%s)", expectedFingerprint, calculatedFingerprintStr)
-			}
-
-			// If the fingerprint matches, the certificate is considered valid
-			return nil
-		}
-	}
+	pbs.setupTLSConfig()
 
 	// Only set current time and defaults for backup mode, not restore mode
 	if !reader {
@@ -620,6 +562,40 @@ func (pbs *PBSClient) Connect(reader bool) {
 		},
 	}
 
+}
+
+// setupTLSConfig configures TLS settings including certificate fingerprint validation
+func (pbs *PBSClient) setupTLSConfig() {
+	pbs.tlsConfig = tls.Config{
+		InsecureSkipVerify: pbs.insecure,
+	}
+
+	// use custom validation instead of CA validation
+	if pbs.insecure {
+		pbs.tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			// Extract the peer certificate
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("no certificates presented by the peer")
+			}
+			peerCert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("failed to parse certificate: %v", err)
+			}
+
+			// Calculate the SHA-256 fingerprint of the certificate
+			expectedFingerprint := strings.ToLower(strings.ReplaceAll(pbs.certfingerprint, ":", ""))
+			calculatedFingerprint := sha256.Sum256(peerCert.Raw)
+			calculatedFingerprintStr := strings.ToLower(hex.EncodeToString(calculatedFingerprint[:]))
+
+			// Compare the calculated fingerprint with the expected one (case-insensitive)
+			if calculatedFingerprintStr != expectedFingerprint {
+				return fmt.Errorf("certificate fingerprint does not match (%s,%s)", expectedFingerprint, calculatedFingerprintStr)
+			}
+
+			// If the fingerprint matches, the certificate is considered valid
+			return nil
+		}
+	}
 }
 
 func (pbs *PBSClient) DownloadPreviousToBytes(archivename string) ([]byte, error) { //In the future also download to tmp if index is extremely big...

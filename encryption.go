@@ -45,7 +45,6 @@ type CryptConfig struct {
 	idKey        []byte  // derived key for digest calculation (PBKDF2 of encKey)
 	gcm          cipher.AEAD  // GCM instance with 16-byte nonce support
 	masterKey    *rsa.PublicKey
-	lastDigestData []byte // stores the data that was actually encrypted for digest calculation
 }
 
 func NewCryptConfig(keyPath string, password string, masterKeyPath string) (*CryptConfig, error) {
@@ -150,17 +149,6 @@ func NewCryptConfig(keyPath string, password string, masterKeyPath string) (*Cry
 	return config, nil
 }
 
-func (cc *CryptConfig) EncryptChunk(plaintext []byte) ([]byte, error) {
-	// Generate 16-byte nonce for PBS compatibility
-	nonce := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, fmt.Errorf("failed to generate nonce: %v", err)
-	}
-
-	ciphertext := cc.gcm.Seal(nonce, nonce, plaintext, nil)
-	return ciphertext, nil
-}
-
 // DecryptChunk decrypts PBS DataBlob format using native Go GCM with 16-byte IV support
 func (cc *CryptConfig) DecryptChunk(dataBlobBytes []byte) ([]byte, error) {
 	if len(dataBlobBytes) < 44 {
@@ -187,10 +175,8 @@ func (cc *CryptConfig) DecryptChunk(dataBlobBytes []byte) ([]byte, error) {
 	}
 	
 	// Verify CRC32 over encrypted data
-	expectedCrc := binary.LittleEndian.Uint32(crc32Bytes)
-	actualCrc := crc32.ChecksumIEEE(encryptedData)
-	if expectedCrc != actualCrc {
-		return nil, fmt.Errorf("CRC32 mismatch: expected %08x, got %08x", expectedCrc, actualCrc)
+	if err := verifyCRC32(crc32Bytes, encryptedData); err != nil {
+		return nil, err
 	}
 	
 	// Decrypt using native Go GCM with 16-byte IV support
@@ -253,10 +239,8 @@ func DecodeDataBlobWithDigest(dataBlobBytes []byte, cryptConfig *CryptConfig, ex
 		data := dataBlobBytes[12:]
 		
 		// Verify CRC32
-		expectedCrc := binary.LittleEndian.Uint32(crc32Bytes)
-		actualCrc := crc32.ChecksumIEEE(data)
-		if expectedCrc != actualCrc {
-			return nil, fmt.Errorf("CRC32 mismatch: expected %08x, got %08x", expectedCrc, actualCrc)
+		if err := verifyCRC32(crc32Bytes, data); err != nil {
+			return nil, err
 		}
 		
 		plaintext = data
@@ -266,10 +250,8 @@ func DecodeDataBlobWithDigest(dataBlobBytes []byte, cryptConfig *CryptConfig, ex
 		compressedData := dataBlobBytes[12:]
 		
 		// Verify CRC32
-		expectedCrc := binary.LittleEndian.Uint32(crc32Bytes)
-		actualCrc := crc32.ChecksumIEEE(compressedData)
-		if expectedCrc != actualCrc {
-			return nil, fmt.Errorf("CRC32 mismatch: expected %08x, got %08x", expectedCrc, actualCrc)
+		if err := verifyCRC32(crc32Bytes, compressedData); err != nil {
+			return nil, err
 		}
 		
 		// Decompress
@@ -345,10 +327,6 @@ func (cc *CryptConfig) EncodeDataBlob(plaintext []byte, compress bool) ([]byte, 
 		magic = BLOB_ENCRYPTED_MAGIC // ENCRYPTED_BLOB_MAGIC_1_0
 	}
 	
-	// Store the ORIGINAL data for digest calculation (PBS always uses original data for digest)
-	// Even when compression is used, the digest is calculated on the original plaintext
-	cc.lastDigestData = plaintext
-	
 	// Generate 16-byte random IV directly - now natively supported by Go GCM
 	iv := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
@@ -375,6 +353,18 @@ func (cc *CryptConfig) EncodeDataBlob(plaintext []byte, compress bool) ([]byte, 
 	binary.LittleEndian.PutUint32(result[8:12], checksum)
 	
 	return result, nil
+}
+
+// Helper functions
+
+// verifyCRC32 verifies CRC32 checksum for data integrity
+func verifyCRC32(crc32Bytes []byte, data []byte) error {
+	expectedCrc := binary.LittleEndian.Uint32(crc32Bytes)
+	actualCrc := crc32.ChecksumIEEE(data)
+	if expectedCrc != actualCrc {
+		return fmt.Errorf("CRC32 mismatch: expected %08x, got %08x", expectedCrc, actualCrc)
+	}
+	return nil
 }
 
 func loadMasterKey(path string) (*rsa.PublicKey, error) {
