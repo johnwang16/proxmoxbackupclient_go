@@ -16,7 +16,7 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 	fmt.Printf("Starting restore of %s to %s\n", archiveName, outputPath)
 
 	// First connect with standard HTTP client to list snapshots
-	client.ConnectRestore()
+	client.ConnectHTTP()
 
 	// Resolve snapshot
 	selectedSnapshot, err := resolveSnapshot(client, snapshotTime)
@@ -27,10 +27,10 @@ func restoreBackup(client *PBSClient, archiveName string, outputPath string, cry
 	fmt.Printf("Selected snapshot: %s at %d\n", selectedSnapshot.BackupID, selectedSnapshot.BackupTime)
 	
 	// Switch to reader protocol for data access
-	err = client.ConnectReader(selectedSnapshot.BackupType, selectedSnapshot.BackupID, selectedSnapshot.BackupTime)
-	if err != nil {
-		return fmt.Errorf("failed to establish reader connection: %w", err)
-	}
+	client.manifest.BackupType = selectedSnapshot.BackupType
+	client.manifest.BackupID = selectedSnapshot.BackupID
+	client.manifest.BackupTime = selectedSnapshot.BackupTime
+	client.Connect(true)
 	
 	// Download the dynamic index using reader protocol
 	didxData, err := client.DownloadFile(archiveName)
@@ -277,7 +277,7 @@ func (r *RestoreReader) loadDataForPosition(pos int64) error {
 // createRestoreReader creates a streaming reader for PBS archive data
 func createRestoreReader(client *PBSClient, archiveName string, cryptConfig *CryptConfig, snapshotTime string) (*RestoreReader, error) {
 	// First connect with standard HTTP client to list snapshots
-	client.ConnectRestore()
+	client.ConnectHTTP()
 
 	// Resolve snapshot
 	selectedSnapshot, err := resolveSnapshot(client, snapshotTime)
@@ -288,10 +288,10 @@ func createRestoreReader(client *PBSClient, archiveName string, cryptConfig *Cry
 	fmt.Printf("Selected snapshot: %s at %d\n", selectedSnapshot.BackupID, selectedSnapshot.BackupTime)
 	
 	// Switch to reader protocol for data access
-	err = client.ConnectReader(selectedSnapshot.BackupType, selectedSnapshot.BackupID, selectedSnapshot.BackupTime)
-	if err != nil {
-		return nil, fmt.Errorf("failed to establish reader connection: %w", err)
-	}
+	client.manifest.BackupType = selectedSnapshot.BackupType
+	client.manifest.BackupID = selectedSnapshot.BackupID
+	client.manifest.BackupTime = selectedSnapshot.BackupTime
+	client.Connect(true)
 	
 	// Download the dynamic index using reader protocol
 	didxData, err := client.DownloadFile(archiveName)

@@ -307,7 +307,7 @@ func main() {
 	// Handle list snapshots mode
 	if cfg.ListSnapshots {
 		fmt.Printf("Listing available snapshots...\n")
-		client.ConnectRestore()
+		client.ConnectHTTP()
 		
 		snapshots, err := client.ListSnapshots()
 		if err != nil {

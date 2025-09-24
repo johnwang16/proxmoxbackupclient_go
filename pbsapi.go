@@ -410,26 +410,13 @@ func (pbs *PBSClient) Connect(reader bool) {
 				}
 				q := &url.Values{}
 
-				// Different parameters for reader vs backup protocol
-				if !reader {
-					// Backup protocol parameters
-					q.Add("backup-time", fmt.Sprintf("%d", pbs.manifest.BackupTime))
-					q.Add("backup-type", pbs.manifest.BackupType)
-					q.Add("store", pbs.datastore)
-					if pbs.namespace != "" {
-						q.Add("ns", pbs.namespace)
-					}
-					q.Add("backup-id", pbs.manifest.BackupID)
-				} else {
-					// Reader protocol parameters - might need different parameters
-					q.Add("backup-time", fmt.Sprintf("%d", pbs.manifest.BackupTime))
-					q.Add("backup-type", pbs.manifest.BackupType)
-					q.Add("store", pbs.datastore)
-					if pbs.namespace != "" {
-						q.Add("ns", pbs.namespace)
-					}
-					q.Add("backup-id", pbs.manifest.BackupID)
+				q.Add("backup-time", fmt.Sprintf("%d", pbs.manifest.BackupTime))
+				q.Add("backup-type", pbs.manifest.BackupType)
+				q.Add("store", pbs.datastore)
+				if pbs.namespace != "" {
+					q.Add("ns", pbs.namespace)
 				}
+				q.Add("backup-id", pbs.manifest.BackupID)
 
 				// Use different endpoint for reader vs backup protocol
 				endpoint := API_BACKUP_ENDPOINT
@@ -513,8 +500,8 @@ func (pbs *PBSClient) setupTLSConfig() {
 	}
 }
 
-func (pbs *PBSClient) ConnectRestore() {
-	// For restore operations, use a standard HTTP client without protocol upgrade
+func (pbs *PBSClient) ConnectHTTP() {
+	// For REST API operations, use a standard HTTP client without protocol upgrade
 	pbs.setupTLSConfig()
 
 	// Standard HTTP client for REST API calls
@@ -526,17 +513,6 @@ func (pbs *PBSClient) ConnectRestore() {
 	}
 }
 
-// ConnectReader establishes a reader protocol connection for downloading data
-func (pbs *PBSClient) ConnectReader(backupType, backupID string, backupTime int64) error {
-	// Set the manifest information for the reader connection
-	pbs.manifest.BackupType = backupType
-	pbs.manifest.BackupID = backupID
-	pbs.manifest.BackupTime = backupTime
-
-	// Use the Connect function in reader mode
-	pbs.Connect(true)
-	return nil
-}
 
 // DownloadFile downloads a file using the reader protocol /download endpoint
 func (pbs *PBSClient) DownloadFile(filename string) ([]byte, error) {
