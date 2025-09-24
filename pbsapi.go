@@ -381,91 +381,6 @@ func (pbs *PBSClient) Finish() error {
 	return nil
 }
 
-func (pbs *PBSClient) UploadRawChunk(writerid uint64, digest string, chunkdata []byte, originalSize int) error {
-	// For encrypted chunks, chunkdata is already a properly formatted DataBlob
-	// Just upload it directly without any additional processing
-	q := &url.Values{}
-	q.Add("digest", digest)
-	q.Add("encoded-size", fmt.Sprintf("%d", len(chunkdata)))
-	q.Add("size", fmt.Sprintf("%d", originalSize))
-	q.Add("wid", fmt.Sprintf("%d", writerid))
-
-	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_chunk?"+q.Encode(), bytes.NewBuffer(chunkdata))
-	if err != nil {
-		return err
-	}
-
-	resp2, err := pbs.client.Do(req)
-	if err != nil {
-		fmt.Println("Error making request:", err)
-		return err
-	}
-	defer resp2.Body.Close()
-
-	if resp2.StatusCode != http.StatusOK {
-		resp1, err := io.ReadAll(resp2.Body)
-		fmt.Println("Error making request:", string(resp1), string(resp2.Proto))
-		return err
-	}
-	return nil
-}
-
-func (pbs *PBSClient) ConnectRestore() {
-	// For restore operations, use a standard HTTP client without protocol upgrade
-	pbs.setupTLSConfig()
-
-	// Standard HTTP client for REST API calls
-	pbs.client = http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &pbs.tlsConfig,
-		},
-		Timeout: 60 * time.Second,
-	}
-}
-
-// ConnectReader establishes a reader protocol connection for downloading data
-func (pbs *PBSClient) ConnectReader(backupType, backupID string, backupTime int64) error {
-	// Set the manifest information for the reader connection
-	pbs.manifest.BackupType = backupType
-	pbs.manifest.BackupID = backupID
-	pbs.manifest.BackupTime = backupTime
-	
-	// Use the Connect function in reader mode
-	pbs.Connect(true)
-	return nil
-}
-
-// DownloadFile downloads a file using the reader protocol /download endpoint
-func (pbs *PBSClient) DownloadFile(filename string) ([]byte, error) {
-	q := &url.Values{}
-	q.Add("file-name", filename)
-	
-	url := pbs.baseurl + "/download?" + q.Encode()
-	
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	
-	resp, err := pbs.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("error downloading file: %v", err)
-	}
-	defer resp.Body.Close()
-	
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-	
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
-}
-
-
 func (pbs *PBSClient) Connect(reader bool) {
 	pbs.writersManifest = make(map[uint64]int)
 	pbs.setupTLSConfig()
@@ -494,7 +409,7 @@ func (pbs *PBSClient) Connect(reader bool) {
 					return nil, err
 				}
 				q := &url.Values{}
-				
+
 				// Different parameters for reader vs backup protocol
 				if !reader {
 					// Backup protocol parameters
@@ -515,13 +430,13 @@ func (pbs *PBSClient) Connect(reader bool) {
 					}
 					q.Add("backup-id", pbs.manifest.BackupID)
 				}
-				
+
 				// Use different endpoint for reader vs backup protocol
 				endpoint := API_BACKUP_ENDPOINT
 				if reader {
 					endpoint = API_READER_ENDPOINT
 				}
-				
+
 				requestLine := "GET " + endpoint + "?" + q.Encode() + " HTTP/1.1\r\n"
 				conn.Write([]byte(requestLine))
 				conn.Write([]byte("Authorization: " + fmt.Sprintf("PBSAPIToken=%s:%s", pbs.authid, pbs.secret) + "\r\n"))
@@ -597,6 +512,91 @@ func (pbs *PBSClient) setupTLSConfig() {
 		}
 	}
 }
+
+func (pbs *PBSClient) ConnectRestore() {
+	// For restore operations, use a standard HTTP client without protocol upgrade
+	pbs.setupTLSConfig()
+
+	// Standard HTTP client for REST API calls
+	pbs.client = http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &pbs.tlsConfig,
+		},
+		Timeout: 60 * time.Second,
+	}
+}
+
+// ConnectReader establishes a reader protocol connection for downloading data
+func (pbs *PBSClient) ConnectReader(backupType, backupID string, backupTime int64) error {
+	// Set the manifest information for the reader connection
+	pbs.manifest.BackupType = backupType
+	pbs.manifest.BackupID = backupID
+	pbs.manifest.BackupTime = backupTime
+
+	// Use the Connect function in reader mode
+	pbs.Connect(true)
+	return nil
+}
+
+// DownloadFile downloads a file using the reader protocol /download endpoint
+func (pbs *PBSClient) DownloadFile(filename string) ([]byte, error) {
+	q := &url.Values{}
+	q.Add("file-name", filename)
+
+	url := pbs.baseurl + "/download?" + q.Encode()
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := pbs.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error downloading file: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func (pbs *PBSClient) UploadRawChunk(writerid uint64, digest string, chunkdata []byte, originalSize int) error {
+	// For encrypted chunks, chunkdata is already a properly formatted DataBlob
+	// Just upload it directly without any additional processing
+	q := &url.Values{}
+	q.Add("digest", digest)
+	q.Add("encoded-size", fmt.Sprintf("%d", len(chunkdata)))
+	q.Add("size", fmt.Sprintf("%d", originalSize))
+	q.Add("wid", fmt.Sprintf("%d", writerid))
+
+	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_chunk?"+q.Encode(), bytes.NewBuffer(chunkdata))
+	if err != nil {
+		return err
+	}
+
+	resp2, err := pbs.client.Do(req)
+	if err != nil {
+		fmt.Println("Error making request:", err)
+		return err
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		resp1, err := io.ReadAll(resp2.Body)
+		fmt.Println("Error making request:", string(resp1), string(resp2.Proto))
+		return err
+	}
+	return nil
+}
+
 
 func (pbs *PBSClient) DownloadPreviousToBytes(archivename string) ([]byte, error) { //In the future also download to tmp if index is extremely big...
 	q := &url.Values{}
