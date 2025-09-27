@@ -6,12 +6,11 @@ The software is still alpha quality and i take no responsability for any kind of
 Contributions are welcome especially 
 
 1. GUI with tray icon to show backup progress and backup taking place
-2. Encryption support
-3. A GUI way of configuring it and maybe create a json job file similiar freefilesync does
-4. Async upload / compress and multicore upload + compression of chunks
-5. Proxmox side patch to add another kind of entry to pxar format with Windows security descriptors in it
-6. Support for windows symlinks
-7. Anything interesting you can come up with :)
+2. A GUI way of configuring it and maybe create a json job file similiar freefilesync does
+3. Async upload / compress and multicore upload + compression of chunks
+4. Proxmox side patch to add another kind of entry to pxar format with Windows security descriptors in it
+5. Support for windows symlinks
+6. Anything interesting you can come up with :)
 
 Usage
 =====
@@ -65,12 +64,22 @@ proxmoxbackupgo.exe
   -mail-body-template string
         mail notification system: mail body template(optional)
 
+  -encryption-key-path string
+        Path to encryption key file (optional)
+  -encryption-password string
+        Password for encrypted key file (optional)
+  -master-key-path string
+        Path to RSA master key for key recovery (optional)
+
   -config string
         Path to JSON config file. If this flag is provided all the others will override the loaded config file
 
 ```
 
-For JSON configuration a JSON example is provided, fill in only the needed fields.
+For JSON configuration, a comprehensive example is provided:
+- `config.json.example` - Complete configuration with all possible settings for backup, restore, encryption, performance tuning, and email notifications
+
+This single configuration file demonstrates all available options and can be used for any operation mode. Simply fill in the needed fields and leave others empty or with default values.
 
 
 Note on mail templating:
@@ -98,11 +107,175 @@ mysqldump yourdatabase | ./proxmoxbackupgo -backupstream yourdatabase.sql [other
 
 This allows leveraging buzhash for dedup even when using tar for example, or the sql dump itself, and if someone wants to attempt it should be possible with some hack to pipe DISM command to generate WIM image to this and have full host backup
 
+Encryption
+==========
+
+This client supports PBS-compatible client-side encryption with:
+- AES-256-GCM encryption algorithm with 16-byte IV support
+- Scrypt key derivation function for password-protected keys
+- PBKDF2 for internal key derivation
+- Master key support for key recovery
+- JSON key file format compatible with proxmox-backup-client
+
+To use encryption:
+1. Create an encryption key using `proxmox-backup-client key create` or any PBS-compatible tool
+2. Specify the key file path with `-encryption-key-path` parameter
+3. Provide the key password with `-encryption-password` parameter (if key is password-protected)
+4. Optionally specify a master key with `-master-key-path` parameter for recovery purposes
+
+Example with encryption:
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backupdir "C:\data" -encryption-key-path "backup.key" -encryption-password "mypass123"
+```
+
+
+Restore Operations
+==================
+
+This client supports full restore operations for both encrypted and unencrypted PBS backups, including PXAR archives and stream backups.
+
+### List Available Snapshots
+
+Before restoring, you can list all available backup snapshots:
+
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -list-snapshots
+```
+
+This will show available snapshots with timestamps, files, and encryption status.
+
+### Restore Parameters
+
+```
+  -restore string
+        Enable restore mode with optional path filter (use '*' to restore everything)
+  -restore-archive string
+        Archive name to restore (defaults to "backup.pxar.didx")
+  -restore-output string
+        Output path for restored data (required when using -restore)
+  -restore-snapshot string
+        Backup snapshot timestamp (e.g., "1704110400" or "2024-01-01T12:00:00Z") 
+        or 'latest' for most recent (default: "latest")
+```
+
+### Selective Restore
+
+The restore functionality supports selective restoration of specific files or directories:
+
+- **Restore everything**: `-restore "*"` or `-restore="*"`
+- **Restore specific path**: `-restore="path/to/file"` or `-restore="directory/"`
+- **Case-insensitive filtering**: Path matching is case-insensitive for better cross-platform compatibility
+
+When using selective restore, only files and directories matching the specified path will be extracted.
+
+### How Restore Works
+
+1. **Snapshot Resolution**: The client first fetches the list of available snapshots from PBS
+2. **Snapshot Selection**: 
+   - If `-restore-snapshot` is "latest" or omitted, selects the most recent snapshot
+   - If a timestamp is provided, finds the exact matching snapshot
+3. **Data Retrieval**: Downloads and decrypts/decompresses chunks as needed
+4. **Data Integrity Verification**: Each chunk is validated against its expected digest to ensure data integrity
+5. **PXAR Extraction**: For PXAR archives, extracts all files and directories with proper permissions
+
+### Data Integrity Verification
+
+The client implements comprehensive data integrity checks during restore operations:
+
+- **Chunk Digest Validation**: Every restored chunk is verified against its expected digest from the backup index
+- **Encryption-Aware**: Uses appropriate digest calculation method based on chunk encryption status
+  - Encrypted chunks: SHA256(plaintext + id_key) following PBS specification
+  - Unencrypted chunks: SHA256(plaintext) standard checksum
+- **Error Detection**: Corrupted chunks, transmission errors, or storage issues are detected and reported
+- **PBS Compatibility**: Uses identical digest validation logic as the official proxmox-backup-client
+
+If a chunk fails digest verification, the restore operation will stop with an error message like:
+```
+failed to decode chunk abc123...: detected chunk with wrong digest
+```
+
+### Restore Examples
+
+**Restore everything (uses defaults: backup.pxar.didx, latest snapshot):**
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore "*" -restore-output "C:\restored"
+```
+
+**Restore specific file or directory:**
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore "Documents/important.txt" -restore-output "C:\restored"
+```
+
+**Restore specific snapshot with encryption:**
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore "*" -restore-output "C:\restored" -restore-snapshot "1704110400" -encryption-key-path "backup.key" -encryption-password "mypass123"
+```
+
+**Restore stream backup to file:**
+```shell
+proxmoxbackupgo.exe -baseurl "https://pbs:8007" -authid "user@realm!token" -secret "secret" -datastore "backup" -backup-id "hostname" -restore "*" -restore-archive "database.sql.didx" -restore-output "C:\database-restored.sql"
+```
+
+### Using Config Files for Both Backup and Restore
+
+The same config file can contain both backup and restore settings. Use the `-restore` flag to switch modes:
+
+**Example config file (config.json.example):**
+```json
+{
+  "baseurl": "https://pbs.example.com:8007",
+  "authid": "user@pbs!token",
+  "secret": "your-secret-token",
+  "datastore": "backup",
+  "backup-id": "hostname",
+  
+  "comment": "Backup settings (used when -restore flag is NOT present)",
+  "backupdir": "C:\\data",
+  
+  "comment": "Restore settings (used when -restore flag IS present)",
+  "restore-archive": "backup.pxar.didx",
+  "restore-output": "C:\\restored",
+  "restore-snapshot": "latest",
+  
+  "comment": "Encryption settings (used for both backup and restore)",
+  "encryption-key-path": "backup.key",
+  "encryption-password": "mypass123"
+}
+```
+
+**For backup mode:**
+```shell
+proxmoxbackupgo.exe -config config.json.example
+```
+
+**For restore mode (same config file):**
+```shell
+proxmoxbackupgo.exe -config config.json.example -restore "*"
+```
+
+**Restore specific path:**
+```shell
+proxmoxbackupgo.exe -config config.json.example -restore "Documents/folder"
+```
+
+**Override config values:**
+```shell
+proxmoxbackupgo.exe -config config.json.example -restore "*" -restore-output "D:\\different-location"
+```
+
+
+Automatic Full Backup Detection
+==================================
+
+The client automatically detects when switching between encrypted and unencrypted modes and forces a full backup to prevent chunk format mismatches. You'll see a message like:
+```
+Encryption mode mismatch detected (current: true, previous: false) - forcing full backup
+```
+
+This automatic detection ensures data integrity when changing encryption settings without requiring manual intervention.
+
 Known Issues
 ============
 
 Windows defender antimalware being active will slow backup down up to 25% of attainable speed 
-
-There's as of now no mechanism to prevent two instances being launched at same time which will screw up VSS and backup
-If you using windows planning utility it should theoretically prevent two instances starting at same time when originating from same job
 

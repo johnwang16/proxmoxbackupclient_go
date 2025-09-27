@@ -79,23 +79,21 @@ func (self *Chunker) Scan(data []byte) uint64 {
 
 	pos := uint64(0)
 
-	if self.window_size < uint64(window_len) {
+	if self.window_size < window_len {
 		need := window_len - self.window_size
-		copy_len := uint64(0)
-		if need < data_len {
-			copy_len = need
-		} else {
+		copy_len := need
+		if need > data_len {
 			copy_len = data_len
 		}
 
-		for _i := uint64(0); _i < copy_len; _i++ {
+		for i := uint64(0); i < copy_len; i++ {
 			B := data[pos]
 			self.window[self.window_size] = B
 			self.h = bits.RotateLeft32(self.h, 1) ^ buzhash_table[B]
-			pos += 1
-			self.window_size += 1
+			pos++
+			self.window_size++
 		}
-
+		
 		self.chunk_size += copy_len
 
 		if self.window_size < window_len {
@@ -104,38 +102,33 @@ func (self *Chunker) Scan(data []byte) uint64 {
 	}
 
 	idx := self.chunk_size & 0x3f
-
+	
+	// Main chunking loop
 	for pos < data_len {
 		enter := data[pos]
 		leave := self.window[idx]
+		
+		// Update hash - this is the core Buzhash algorithm
 		self.h = bits.RotateLeft32(self.h, 1) ^ buzhash_table[leave] ^ buzhash_table[enter]
 		self.chunk_size += 1
 		pos += 1
 		self.window[idx] = enter
 
-		if self.shall_break() {
+		// Check for chunk boundary
+		if self.chunk_size >= self.chunk_size_max ||
+			(self.chunk_size >= self.chunk_size_min && 
+			 (self.h & self.break_test_mask) >= self.break_test_minimum) {
+			// Reset state for next chunk
 			self.h = 0
 			self.chunk_size = 0
 			self.window_size = 0
 			return pos
 		}
 
-		idx = self.chunk_size & 0x3f
+		idx = (idx + 1) & 0x3f
 	}
 
 	return 0
 
 }
 
-func (self *Chunker) shall_break() bool {
-	if self.chunk_size >= self.chunk_size_max {
-		return true
-	}
-
-	if self.chunk_size < self.chunk_size_min {
-		return false
-	}
-
-	//return (self.h % self._discriminator) == (self._discriminator - 1)
-	return (self.h & self.break_test_mask) >= self.break_test_minimum
-}

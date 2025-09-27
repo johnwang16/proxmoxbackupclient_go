@@ -4,53 +4,39 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math/bits"
 	"os"
-	"sort"
-
-	//	"io/ioutil"
 	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/dchest/siphash"
 )
 
-const (
-	PXAR_ENTRY               uint64 = 0xd5956474e588acef
-	PXAR_ENTRY_V1            uint64 = 0x11da850a1c1cceff
-	PXAR_FILENAME            uint64 = 0x16701121063917b3
-	PXAR_SYMLINK             uint64 = 0x27f971e7dbf5dc5f
-	PXAR_DEVICE              uint64 = 0x9fc9e906586d5ce9
-	PXAR_XATTR               uint64 = 0x0dab0229b57dcd03
-	PXAR_ACL_USER            uint64 = 0x2ce8540a457d55b8
-	PXAR_ACL_GROUP           uint64 = 0x136e3eceb04c03ab
-	PXAR_ACL_GROUP_OBJ       uint64 = 0x10868031e9582876
-	PXAR_ACL_DEFAULT         uint64 = 0xbbbb13415a6896f5
-	PXAR_ACL_DEFAULT_USER    uint64 = 0xc89357b40532cd1f
-	PXAR_ACL_DEFAULT_GROUP   uint64 = 0xf90a8a5816038ffe
-	PXAR_FCAPS               uint64 = 0x2da9dd9db5f7fb67
-	PXAR_QUOTA_PROJID        uint64 = 0xe07540e82f7d1cbb
-	PXAR_HARDLINK            uint64 = 0x51269c8422bd7275
-	PXAR_PAYLOAD             uint64 = 0x28147a1b0b7c1a25
-	PXAR_GOODBYE             uint64 = 0x2fec4fa642d5731d
-	PXAR_GOODBYE_TAIL_MARKER uint64 = 0xef5eed5b753e1555
-)
 
-var catalog_magic = []byte{145, 253, 96, 249, 196, 103, 88, 213}
 
-const (
-	IFMT   uint64 = 0o0170000
-	IFSOCK uint64 = 0o0140000
-	IFLNK  uint64 = 0o0120000
-	IFREG  uint64 = 0o0100000
-	IFBLK  uint64 = 0o0060000
-	IFDIR  uint64 = 0o0040000
-	IFCHR  uint64 = 0o0020000
-	IFIFO  uint64 = 0o0010000
+// Magic bytes moved to constants.go
 
-	ISUID uint64 = 0o0004000
-	ISGID uint64 = 0o0002000
-	ISVTX uint64 = 0o0001000
-)
+// PXAR entry header structure
+type PXARHeader struct {
+	Type   uint64
+	Length uint64
+}
+
+// PXAR entry structure  
+type PXAREntry struct {
+	Mode     uint64
+	Flags    uint64
+	UID      uint32
+	GID      uint32
+	MTime    uint64
+	MTimeNs  uint32
+	_        uint32 // padding
+}
+
 
 type MTime struct {
 	secs    uint64
@@ -149,6 +135,7 @@ type PXARArchive struct {
 	buffer         bytes.Buffer
 	pos            uint64
 	archivename    string
+	perfConfig     *PerformanceConfig
 
 	catalog_pos uint64
 }
@@ -261,7 +248,7 @@ func (a *PXARArchive) WriteDir(path string, dirname string, toplevel bool) Catal
 		a.buffer.WriteByte(0x00)
 	} else {
 		if a.catalogWriteCB != nil {
-			a.catalogWriteCB(catalog_magic)
+			a.catalogWriteCB(CATALOG_MAGIC)
 			a.catalog_pos = 8
 		}
 	}
@@ -459,25 +446,452 @@ func (a *PXARArchive) WriteFile(path string, basename string) CatalogFile {
 
 	a.Flush()
 
-	readbuffer := make([]byte, 1024*64)
+	// Use configurable buffer for file reading
+	bufferSize := DEFAULT_BUFFER_SIZE // Default fallback
+	if a.perfConfig != nil {
+		bufferSize = a.perfConfig.GetBufferSizes().ReadBuffer
+	}
+	readbuffer := make([]byte, bufferSize)
+
+	// Use WaitGroup for synchronization
+	var wg sync.WaitGroup
+
+	// Create async pipeline channel with buffer depth for optimal overlap
+	pipelineDepth := 4 // Allow 4 buffers in pipeline
+	streamChan := make(chan []byte, pipelineDepth)
+
+	// Start async streaming goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for data := range streamChan {
+			a.writeCB(data)
+		}
+	}()
 
 	for {
 		nread, err := file.Read(readbuffer)
+
 		if nread <= 0 {
 			break
 		}
 		if err != nil {
 			panic(err.Error())
 		}
-		a.buffer.Write(readbuffer[:nread])
-		a.Flush()
+
+		a.pos += uint64(nread)
+
+		// Send data to async streaming pipeline (non-blocking with buffer)
+		// Make a copy since we're reusing readbuffer
+		data := make([]byte, nread)
+		copy(data, readbuffer[:nread])
+		streamChan <- data
 	}
 
-	a.Flush()
+	// Close channel and wait for streaming to complete
+	close(streamChan)
+	wg.Wait()
+
+	// File processing complete
+
+	// No flush needed - data was streamed asynchronously
 
 	return CatalogFile{
 		Name:  basename,
 		MTime: uint64(fileInfo.ModTime().Unix()),
 		Size:  uint64(fileInfo.Size()),
 	}
+}
+
+
+// PXARExtractor encapsulates all extraction state
+type PXARExtractor struct {
+	reader       io.ReadSeeker
+	outputDir    string
+	filterPath   string
+	dirStack     []DirectoryStackEntry
+	currentFile  string
+	currentEntry *PXAREntry
+}
+
+// ExtractPXAR extracts a PXAR archive to the specified directory
+func ExtractPXAR(pxarFile string, outputDir string) error {
+	file, err := os.Open(pxarFile)
+	if err != nil {
+		return fmt.Errorf("failed to open PXAR file: %w", err)
+	}
+	defer file.Close()
+
+	return ExtractPXARFromReader(file, outputDir, "")
+}
+
+// ExtractPXARFromReader extracts a PXAR archive from an io.ReadSeeker to the specified directory
+func ExtractPXARFromReader(reader io.ReadSeeker, outputDir string, filterPath string) error {
+	// Create output directory if it doesn't exist
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	// Create extractor with all state encapsulated
+	extractor := &PXARExtractor{
+		reader:     reader,
+		outputDir:  outputDir,
+		filterPath: normalizeFilterPath(filterPath),
+		dirStack: []DirectoryStackEntry{{
+			path:     "",
+			baseDir:  outputDir,
+			filename: "",
+		}},
+	}
+
+	return extractor.Extract()
+}
+
+
+// Directory stack entry for tracking PXAR directory context
+type DirectoryStackEntry struct {
+	path     string
+	baseDir  string
+	filename string
+}
+
+// shouldExtractPath determines if a path should be extracted based on the filter
+func shouldExtractPath(fullPath string, filterPath string) bool {
+	if filterPath == "" {
+		return true // No filter, extract everything
+	}
+	
+	// Normalize paths for case-insensitive comparison
+	fullPath = strings.ToLower(filepath.Clean(fullPath))
+	filterPath = strings.ToLower(filepath.Clean(filterPath))
+	
+	// Check if the path matches or is under the filter path
+	return fullPath == filterPath || strings.HasPrefix(fullPath, filterPath+string(filepath.Separator))
+}
+
+// Extract performs the extraction with preserved directory timing
+func (e *PXARExtractor) Extract() error {
+	for {
+		header, err := e.readHeader()
+		if err != nil {
+			if err == io.EOF {
+				return nil // Normal termination
+			}
+			return err
+		}
+
+		if err := e.processEntry(header); err != nil {
+			return err
+		}
+
+		// Directory entry check at END of loop
+		if e.currentFile != "" && e.isDirectory() {
+			e.enterDirectory()
+		}
+	}
+}
+
+// readHeader reads and validates a PXAR header
+func (e *PXARExtractor) readHeader() (*PXARHeader, error) {
+	var header PXARHeader
+	err := binary.Read(e.reader, binary.LittleEndian, &header)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate header
+	if header.Length < PXAR_HEADER_MIN_SIZE {
+		return nil, fmt.Errorf("invalid header length: %d (type: 0x%x)", header.Length, header.Type)
+	}
+
+	return &header, nil
+}
+
+// processEntry routes to appropriate handler based on entry type
+func (e *PXARExtractor) processEntry(header *PXARHeader) error {
+	switch header.Type {
+	case PXAR_ENTRY, PXAR_ENTRY_V1:
+		return e.processMetadata(header)
+	case PXAR_FILENAME:
+		return e.processFilename(header)
+	case PXAR_PAYLOAD:
+		return e.processPayload(header)
+	case PXAR_SYMLINK:
+		return e.processSymlink(header)
+	case PXAR_GOODBYE:
+		return e.processGoodbye(header)
+	default:
+		// Skip unknown entry types
+		return e.skipBytes(int64(header.Length - PXAR_HEADER_MIN_SIZE))
+	}
+}
+
+// processMetadata handles entry metadata
+func (e *PXARExtractor) processMetadata(header *PXARHeader) error {
+	var entry PXAREntry
+	if err := binary.Read(e.reader, binary.LittleEndian, &entry); err != nil {
+		return fmt.Errorf("failed to read PXAR entry: %w", err)
+	}
+	// Store entry metadata for later use when creating file/directory
+	e.currentEntry = &entry
+
+	// Skip any remaining data in the entry
+	remaining := int64(header.Length) - PXAR_HEADER_MIN_SIZE - PXAR_ENTRY_STRUCT_SIZE
+	if remaining > 0 {
+		return e.skipBytes(remaining)
+	}
+
+	return nil
+}
+
+// processFilename handles filename entries
+func (e *PXARExtractor) processFilename(header *PXARHeader) error {
+	// Read filename
+	nameLength := header.Length - PXAR_HEADER_MIN_SIZE
+	nameBytes := make([]byte, nameLength)
+
+	if _, err := io.ReadFull(e.reader, nameBytes); err != nil {
+		return fmt.Errorf("failed to read filename: %w", err)
+	}
+	// Remove null terminator
+	e.currentFile = string(bytes.TrimRight(nameBytes, "\x00"))
+	return nil
+}
+
+// processPayload handles file content extraction
+func (e *PXARExtractor) processPayload(header *PXARHeader) error {
+	payloadLength := header.Length - PXAR_HEADER_MIN_SIZE
+
+	// No current file means orphaned payload - skip it
+	if e.currentFile == "" {
+		return e.skipBytes(int64(payloadLength))
+	}
+
+	// Build the relative path for this file
+	relativePath := e.buildRelativePath()
+
+	// Check if we should extract this file based on filter
+	if !e.shouldExtract(relativePath) {
+		e.currentFile = ""
+		e.currentEntry = nil
+		return e.skipBytes(int64(payloadLength))
+	}
+
+	// Extract the file
+	if err := e.extractFile(relativePath, payloadLength); err != nil {
+		return err
+	}
+
+	// Reset state for next file
+	e.currentFile = ""
+	e.currentEntry = nil
+
+	return nil
+}
+
+// processSymlink handles symbolic link creation
+func (e *PXARExtractor) processSymlink(header *PXARHeader) error {
+	linkLength := header.Length - PXAR_HEADER_MIN_SIZE
+	linkBytes := make([]byte, linkLength)
+
+	if _, err := io.ReadFull(e.reader, linkBytes); err != nil {
+		return fmt.Errorf("failed to read symlink target: %w", err)
+	}
+
+	if e.currentFile == "" {
+		return nil // Orphaned symlink data
+	}
+
+	relativePath := e.buildRelativePath()
+
+	if !e.shouldExtract(relativePath) {
+		e.currentFile = ""
+		e.currentEntry = nil
+		return nil
+	}
+
+	target := string(bytes.TrimRight(linkBytes, "\x00"))
+	if err := e.createSymlink(relativePath, target); err != nil {
+		// Log warning but don't fail extraction
+		fmt.Printf("Warning: %v\n", err)
+	}
+
+	e.currentFile = ""
+	e.currentEntry = nil
+
+	return nil
+}
+
+// processGoodbye handles directory exit
+func (e *PXARExtractor) processGoodbye(header *PXARHeader) error {
+	// Skip goodbye payload
+	payloadLength := header.Length - PXAR_HEADER_MIN_SIZE
+	if payloadLength > 0 {
+		if err := e.skipBytes(int64(payloadLength)); err != nil {
+			return err
+		}
+	}
+
+	// Pop directory from stack if not at root
+	if len(e.dirStack) > 1 {
+		e.dirStack = e.dirStack[:len(e.dirStack)-1]
+		e.currentFile = ""
+	}
+
+	return nil
+}
+
+// Helper methods
+
+// isDirectory checks if current entry is a directory by peeking ahead
+func (e *PXARExtractor) isDirectory() bool {
+	currentPos, _ := e.reader.Seek(0, io.SeekCurrent)
+	defer e.reader.Seek(currentPos, io.SeekStart)
+
+	var peekHeader PXARHeader
+	err := binary.Read(e.reader, binary.LittleEndian, &peekHeader)
+
+	return err == nil && (peekHeader.Type == PXAR_FILENAME || peekHeader.Type == PXAR_GOODBYE)
+}
+
+// enterDirectory handles directory entry and stack management
+func (e *PXARExtractor) enterDirectory() {
+	relativePath := e.buildRelativePath()
+
+	// Create directory if it should be extracted
+	if e.shouldExtract(relativePath) {
+		fullPath := filepath.Join(e.outputDir, relativePath)
+
+		if err := os.MkdirAll(fullPath, 0755); err != nil {
+			fmt.Printf("Warning: failed to create directory %s: %v\n", fullPath, err)
+		} else {
+			e.applyFileAttributes(fullPath)
+			fmt.Printf("Created directory: %s\n", relativePath)
+		}
+	}
+
+	// Update directory stack
+	currentDir := e.dirStack[len(e.dirStack)-1]
+	e.dirStack = append(e.dirStack, DirectoryStackEntry{
+		path:     relativePath,
+		baseDir:  currentDir.baseDir,
+		filename: e.currentFile,
+	})
+
+	e.currentFile = ""
+	e.currentEntry = nil
+}
+
+// buildRelativePath constructs the current relative path
+func (e *PXARExtractor) buildRelativePath() string {
+	currentDir := e.dirStack[len(e.dirStack)-1]
+	if currentDir.path == "" {
+		return e.currentFile
+	}
+	return filepath.Join(currentDir.path, e.currentFile)
+}
+
+// shouldExtract determines if a path matches the filter
+func (e *PXARExtractor) shouldExtract(relativePath string) bool {
+	if e.filterPath == "" {
+		return true // No filter, extract everything
+	}
+
+	normalizedPath := strings.ToLower(filepath.Clean(relativePath))
+	return normalizedPath == e.filterPath ||
+	       strings.HasPrefix(normalizedPath, e.filterPath+string(filepath.Separator))
+}
+
+// extractFile extracts file content to disk
+func (e *PXARExtractor) extractFile(relativePath string, size uint64) error {
+	// Print file name before starting extraction (no newline)
+	fmt.Printf("Extracting file: %s", relativePath)
+
+	fullPath := filepath.Join(e.outputDir, relativePath)
+
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return fmt.Errorf("failed to create parent directory for %s: %w", fullPath, err)
+	}
+
+	// Create the file
+	file, err := os.Create(fullPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file %s: %w", fullPath, err)
+	}
+	defer file.Close()
+
+	written, err := io.CopyN(file, e.reader, int64(size))
+	if err != nil {
+		return fmt.Errorf("failed to write file content: %w", err)
+	}
+
+	// Apply file attributes
+	e.applyFileAttributes(fullPath)
+
+	// Complete the line with done message
+	fmt.Printf(" - done (%d bytes)\n", written)
+	return nil
+}
+
+// createSymlink creates a symbolic link
+func (e *PXARExtractor) createSymlink(relativePath, target string) error {
+	fullPath := filepath.Join(e.outputDir, relativePath)
+
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return fmt.Errorf("failed to create parent directory for symlink: %w", err)
+	}
+
+	if err := os.Symlink(target, fullPath); err != nil {
+		return fmt.Errorf("failed to create symlink %s -> %s: %w", fullPath, target, err)
+	}
+
+	fmt.Printf("Extracted symlink: %s -> %s\n", relativePath, target)
+	return nil
+}
+
+// applyFileAttributes applies metadata to extracted files
+func (e *PXARExtractor) applyFileAttributes(path string) {
+	if e.currentEntry == nil {
+		return
+	}
+
+	// Apply permissions
+	mode := os.FileMode(e.currentEntry.Mode & 0777)
+	if err := os.Chmod(path, mode); err != nil {
+		// Non-fatal, just log
+		fmt.Printf("Warning: failed to set permissions for %s: %v\n", path, err)
+	}
+
+	// Apply timestamps
+	mtime := time.Unix(int64(e.currentEntry.MTime), int64(e.currentEntry.MTimeNs))
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		// Non-fatal, just log
+		fmt.Printf("Warning: failed to set timestamps for %s: %v\n", path, err)
+	}
+
+	// Try to apply ownership (usually fails for non-root)
+	_ = os.Chown(path, int(e.currentEntry.UID), int(e.currentEntry.GID))
+}
+
+// Helper functions
+
+// skipBytes skips n bytes in the reader
+func (e *PXARExtractor) skipBytes(n int64) error {
+	_, err := e.reader.Seek(n, io.SeekCurrent)
+	if err != nil {
+		// Fallback to reading if seek fails
+		_, err = io.CopyN(io.Discard, e.reader, n)
+	}
+	return err
+}
+
+
+// normalize filter paths
+func normalizeFilterPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	return strings.ToLower(filepath.Clean(path))
 }

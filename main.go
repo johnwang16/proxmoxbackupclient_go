@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,12 +24,13 @@ import (
 
 
 
+
 var defaultMailSubjectTemplate = "Backup {{.Status}}"
 var defaultMailBodyTemplate = `{{if .Success}}Backup complete ({{.FromattedDuration}})
 Chunks New {{.NewChunks}}, Reused {{.ReusedChunks}}.{{else}}Error occurred while working, backup may be not completed.
 Last error is: {{.ErrorStr}}{{end}}`
 
-var didxMagic = []byte{28, 145, 78, 165, 25, 186, 179, 205}
+// Constants moved to constants.go
 
 type ChunkState struct {
 	assignments        []string
@@ -42,6 +44,7 @@ type ChunkState struct {
 	newchunk *atomic.Uint64 
 	reusechunk *atomic.Uint64
 	knownChunks *hashmap.Map[string, bool]
+	cryptConfig *CryptConfig
 }
 
 type DidxEntry struct {
@@ -49,21 +52,45 @@ type DidxEntry struct {
 	digest []byte
 }
 
-func (c *ChunkState) Init(newchunk *atomic.Uint64 , reusechunk *atomic.Uint64, knownChunks *hashmap.Map[string, bool] ) {
+func (c *ChunkState) Init(newchunk *atomic.Uint64 , reusechunk *atomic.Uint64, knownChunks *hashmap.Map[string, bool], cryptConfig *CryptConfig ) {
 	c.assignments = make([]string, 0)
 	c.assignments_offset = make([]uint64, 0)
 	c.pos = 0
 	c.chunkcount = 0
 	c.chunkdigests = sha256.New()
 	c.current_chunk = make([]byte, 0)
+	c.cryptConfig = cryptConfig
+	
+	chunkAvgSize := uint64(DEFAULT_CHUNK_SIZE)
+	if cryptConfig != nil {
+		// Reduce chunk size to account for encryption overhead (28 bytes for AES-GCM)
+		// Use safety margin to ensure max chunks stay under PBS 16MB limit
+		chunkAvgSize = uint64(DEFAULT_CHUNK_SIZE - 100)
+	}
 	c.C = Chunker{}
-	c.C.New(1024 * 1024 * 4)
+	c.C.New(chunkAvgSize)
 	c.reusechunk = reusechunk
 	c.newchunk = newchunk
 	c.knownChunks = knownChunks
 }
 
+// computeChunkDigest computes the correct digest for a chunk following PBS spec
+func (c *ChunkState) computeChunkDigest(data []byte) ([]byte, string) {
+	if c.cryptConfig != nil {
+		// For encrypted chunks: hash plaintext + encryption key
+		digest := c.cryptConfig.ComputeDigest(data)
+		return digest[:], hex.EncodeToString(digest[:])
+	} else {
+		// For unencrypted chunks: hash plaintext only
+		h := sha256.New()
+		h.Write(data)
+		bindigest := h.Sum(nil)
+		return bindigest, hex.EncodeToString(bindigest)
+	}
+}
+
 func (c *ChunkState) HandleData(b []byte, client *PBSClient){
+	// Use standard chunking algorithm
 	chunkpos := c.C.Scan(b)
 
 	if chunkpos == 0 {
@@ -75,26 +102,45 @@ func (c *ChunkState) HandleData(b []byte, client *PBSClient){
 			//Append data until break position
 			c.current_chunk = append(c.current_chunk, b[:chunkpos]...)
 
-			h := sha256.New()
-			// TODO: error handling inside callback
-			h.Write(c.current_chunk)
-			bindigest := h.Sum(nil)
-			shahash := hex.EncodeToString(bindigest)
+			chunkData := c.current_chunk
+			var bindigest []byte
+			var shahash string
+			
+			if c.cryptConfig != nil {
+				// For encrypted chunks: digest on plaintext before encryption
+				bindigest, shahash = c.computeChunkDigest(c.current_chunk)
+
+				// Then create the encrypted DataBlob
+				var err error
+				chunkData, err = c.cryptConfig.EncodeDataBlob(c.current_chunk, true)
+				if err != nil {
+					fmt.Printf("DataBlob encoding failed: %v\n", err)
+					return
+				}
+			} else {
+				// Unencrypted chunks - digest on original data
+				bindigest, shahash = c.computeChunkDigest(c.current_chunk)
+			}
 
 			if _, ok := c.knownChunks.GetOrInsert(shahash, true); !ok {
-				fmt.Printf("New chunk[%s] %d bytes\n", shahash, len(c.current_chunk))
+				fmt.Printf("New chunk[%s] %d bytes\n", shahash, len(chunkData))
 				c.newchunk.Add(1)
 
-				client.UploadCompressedChunk(c.wrid, shahash, c.current_chunk)
+				if c.cryptConfig != nil {
+					// For encrypted chunks, upload as raw blob since it's already in DataBlob format
+					client.UploadRawChunk(c.wrid, shahash, chunkData, len(c.current_chunk))
+				} else {
+					client.UploadCompressedChunk(c.wrid, shahash, chunkData, len(c.current_chunk))
+				}
 			} else {
-				fmt.Printf("Reuse chunk[%s] %d bytes\n", shahash, len(c.current_chunk))
+				fmt.Printf("Reuse chunk[%s] %d bytes\n", shahash, len(chunkData))
 				c.reusechunk.Add(1)
 			}
 
 			// TODO: error handling inside callback
 			binary.Write(c.chunkdigests, binary.LittleEndian, (c.pos + uint64(len(c.current_chunk))))
 			// TODO: error handling inside callback
-			c.chunkdigests.Write(h.Sum(nil))
+			c.chunkdigests.Write(bindigest)
 
 			c.assignments_offset = append(c.assignments_offset, c.pos)
 			c.assignments = append(c.assignments, shahash)
@@ -116,22 +162,40 @@ func (c *ChunkState) Eof(client *PBSClient) {
 	//Here we write the remainder of data for which cyclic hash did not trigger
 	
 	if len(c.current_chunk) > 0 {
-		h := sha256.New()
-		_, err := h.Write(c.current_chunk)
-		if err != nil {
-			panic(err)
+		chunkData := c.current_chunk
+		var bindigest []byte
+		var shahash string
+		
+		if c.cryptConfig != nil {
+			// For encrypted chunks: digest on plaintext before encryption
+			bindigest, shahash = c.computeChunkDigest(c.current_chunk)
+
+			// Then create the encrypted DataBlob
+			var err error
+			chunkData, err = c.cryptConfig.EncodeDataBlob(c.current_chunk, true)
+			if err != nil {
+				fmt.Printf("DataBlob encoding failed: %v\n", err)
+				return
+			}
+		} else {
+			// Unencrypted chunks - digest on original data
+			bindigest, shahash = c.computeChunkDigest(c.current_chunk)
 		}
 
-		shahash := hex.EncodeToString(h.Sum(nil))
 		binary.Write(c.chunkdigests, binary.LittleEndian, (c.pos + uint64(len(c.current_chunk))))
-		c.chunkdigests.Write(h.Sum(nil))
+		c.chunkdigests.Write(bindigest)
 
 		if _, ok := c.knownChunks.GetOrInsert(shahash, true); !ok {
-			fmt.Printf("New chunk[%s] %d bytes\n", shahash, len(c.current_chunk))
-			client.UploadCompressedChunk(c.wrid, shahash, c.current_chunk)
+			fmt.Printf("New chunk[%s] %d bytes\n", shahash, len(chunkData))
+			if c.cryptConfig != nil {
+				// For encrypted chunks, upload as raw blob since it's already in DataBlob format
+				client.UploadRawChunk(c.wrid, shahash, chunkData, len(c.current_chunk))
+			} else {
+				client.UploadCompressedChunk(c.wrid, shahash, chunkData, len(c.current_chunk))
+			}
 			c.newchunk.Add(1)
 		} else {
-			fmt.Printf("Reuse chunk[%s] %d bytes\n", shahash, len(c.current_chunk))
+			fmt.Printf("Reuse chunk[%s] %d bytes\n", shahash, len(chunkData))
 			c.reusechunk.Add(1)
 		}
 		c.assignments_offset = append(c.assignments_offset, c.pos)
@@ -149,7 +213,8 @@ func (c *ChunkState) Eof(client *PBSClient) {
 		client.AssignChunks(c.wrid, c.assignments[k:k2], c.assignments_offset[k:k2])
 	}
 
-	client.CloseDynamicIndex(c.wrid, hex.EncodeToString(c.chunkdigests.Sum(nil)), c.pos, c.chunkcount)
+	digest := hex.EncodeToString(c.chunkdigests.Sum(nil))
+	client.CloseDynamicIndex(c.wrid, digest, c.pos, c.chunkcount)
 }
 
 
@@ -158,9 +223,28 @@ func main() {
 	var newchunk *atomic.Uint64 = new(atomic.Uint64)
 	var reusechunk *atomic.Uint64 = new(atomic.Uint64)
 
-	cfg := loadConfig()
+	cfg, isRestore, restorePath := loadConfig()
+	cfg.InitializeLogLevel()
+	
+	// Show worker count for all parallel operations
+	if cfg.Performance != nil {
+		fmt.Printf("Using %d workers for parallel processing\n", cfg.Performance.GetWorkerCount())
+	}
 
-	if ok := cfg.valid(); !ok {
+	var cryptConfig *CryptConfig
+	if cfg.EncryptionKeyPath != "" {
+		var err error
+		cryptConfig, err = NewCryptConfig(cfg.EncryptionKeyPath, cfg.EncryptionPassword, cfg.MasterKeyPath)
+		if err != nil {
+			fmt.Printf("Failed to initialize encryption: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Encryption enabled")
+	} else {
+		fmt.Printf("No encryption configured\n")
+	}
+
+	if ok := cfg.valid(isRestore); !ok {
 		if runtime.GOOS == "windows" {
 			usage := "All options are mandatory:\n"
 			flag.VisitAll(func(f *flag.Flag) {
@@ -207,6 +291,7 @@ func main() {
 		datastore:       cfg.Datastore,
 		namespace:       cfg.Namespace,
 		insecure:        insecure,
+		cryptConfig:     cryptConfig,
 		manifest: BackupManifest{
 			BackupID: cfg.BackupID,
 		},
@@ -218,15 +303,73 @@ func main() {
 	}
 
 	begin := time.Now()
+	
+	// Handle list snapshots mode
+	if cfg.ListSnapshots {
+		fmt.Printf("Listing available snapshots...\n")
+		client.ConnectHTTP()
+		
+		snapshots, err := client.ListSnapshots()
+		if err != nil {
+			fmt.Printf("Failed to list snapshots: %v\n", err)
+			os.Exit(1)
+		}
+		
+		if len(snapshots) == 0 {
+			fmt.Printf("No snapshots found in datastore '%s'\n", cfg.Datastore)
+		} else {
+			fmt.Printf("Available snapshots in datastore '%s':\n", cfg.Datastore)
+			for _, snapshot := range snapshots {
+				// Convert timestamp to readable format
+				backupTime := time.Unix(snapshot.BackupTime, 0)
+				fmt.Printf("  - Backup ID: %s\n", snapshot.BackupID)
+				fmt.Printf("    Time: %s (%d)\n", backupTime.Format("2006-01-02 15:04:05 MST"), snapshot.BackupTime)
+				fmt.Printf("    Type: %s\n", snapshot.BackupType)
+				if snapshot.Comment != "" {
+					fmt.Printf("    Comment: %s\n", snapshot.Comment)
+				}
+				fmt.Printf("    Files:\n")
+				for _, file := range snapshot.Files {
+					fmt.Printf("      - %s (%s, %d bytes)\n", file.Filename, file.CryptMode, file.Size)
+				}
+				fmt.Printf("\n")
+			}
+		}
+		os.Exit(0)
+	}
+	
+	// Handle restore mode (triggered by -restore flag)
+	if isRestore {
+		fmt.Printf("Starting restore mode\n")
+		
+		// Determine restore type based on archive name
+		if strings.HasSuffix(cfg.RestoreArchive, ".pxar"+DIDX_EXTENSION) {
+			// Full PXAR restore
+			err = restorePXAR(client, cfg.RestoreOutput, cryptConfig, cfg.RestoreSnapshot, restorePath)
+		} else {
+			// Generic archive restore
+			err = restoreBackup(client, cfg.RestoreArchive, cfg.RestoreOutput, cryptConfig, cfg.RestoreSnapshot)
+		}
+		
+		if err != nil {
+			fmt.Printf("Restore failed: %v\n", err)
+			os.Exit(1)
+		}
+		
+		fmt.Printf("Restore completed successfully\n")
+		os.Exit(0)
+	}
+	
+	// Backup mode
 	if cfg.BackupSourceDir != "" {
-		err = backup(client, newchunk, reusechunk, cfg.PxarOut, cfg.BackupSourceDir)
+		err = backup(client, newchunk, reusechunk, cfg.PxarOut, cfg.BackupSourceDir, cryptConfig, cfg)
 	} else if cfg.BackupStreamName != "" {
 		sn := cfg.BackupStreamName
-		if ! strings.HasSuffix(sn, ".didx" ) {
-			sn += ".didx"
+		if ! strings.HasSuffix(sn, DIDX_EXTENSION ) {
+			sn += DIDX_EXTENSION
 		}
 		fmt.Printf("Backing up from STDIN to %s", sn)
-		err = backup_stream(client, newchunk, reusechunk, sn, os.Stdin )
+		err = backup_stream(client, newchunk, reusechunk, sn, os.Stdin, cryptConfig, cfg )
 
 	}else{
 		panic("No backup dir or stream name specified, exiting")
@@ -299,59 +442,135 @@ func main() {
 
 }
 
-func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filename string, stream io.Reader ) error {
+func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filename string, stream io.Reader, cryptConfig *CryptConfig, config *Config ) error {
+	var err error
+	var previousDidx []byte
 	knownChunks := hashmap.New[string, bool]()
 	client.Connect(false)
-	previousDidx, err := client.DownloadPreviousToBytes(filename)
-	if err != nil {
-		return err
+
+	forceFullBackup := false
+
+	// Auto-detect encryption mode mismatch
+	currentlyEncrypted := (cryptConfig != nil)
+	previousEncryptionMode := client.CheckPreviousEncryptionMode()
+	if previousEncryptionMode == EncryptionUnknown {
+		fmt.Printf("Error: Could not parse previous manifest, forcing full backup\n")
+		forceFullBackup = true
+	} else {
+		previouslyEncrypted := (previousEncryptionMode == EncryptionEnabled)
+		if currentlyEncrypted != previouslyEncrypted {
+			fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
+			forceFullBackup = true
+		}
 	}
 
-	fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
-
-	if !bytes.HasPrefix(previousDidx, didxMagic) {
-		fmt.Printf("Previous index has wrong magic (%s)!\n", previousDidx[:8])
-
-	} else {
-		//Header as per proxmox documentation is fixed size of 4096 bytes,
-		//then offset of type uint64 and sha256 digests follow , so 40 byte each record until EOF
-		previousDidx = previousDidx[4096:]
-		for i := 0; i*40 < len(previousDidx); i += 1 {
-			e := DidxEntry{}
-			e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
-			e.digest = previousDidx[i*40+8 : i*40+40]
-			shahash := hex.EncodeToString(e.digest)
-			fmt.Printf("Previous: %s\n", shahash)
-			knownChunks.Set(shahash, true)
+	if !forceFullBackup {
+		previousDidx, err = client.DownloadPreviousToBytes(filename)
+		if err != nil {
+			fmt.Printf("Could not download previous DIDX (this is normal for first backup): %v\n", err)
+			fmt.Printf("Forcing full backup mode\n")
+			forceFullBackup = true
 		}
+
+	}
+
+	if !forceFullBackup && len(previousDidx) > 0 {
+		fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
+
+		if !bytes.HasPrefix(previousDidx, DIDX_MAGIC) {
+			fmt.Printf("Previous index has wrong magic (%s)!\n", previousDidx[:8])
+
+		} else {
+			//Header as per proxmox documentation is fixed size of 4096 bytes,
+			//then offset of type uint64 and sha256 digests follow , so 40 byte each record until EOF
+			previousDidx = previousDidx[4096:]
+			
+			// Parallel DIDX parsing for faster startup on large backups
+			numChunks := len(previousDidx) / DIDX_ENTRY_SIZE
+			if numChunks > 0 {
+				fmt.Printf("Parsing %d chunks from previous backup index...\n", numChunks)
+				
+				// Use worker pool for parallel parsing from performance config
+				numWorkers := config.Performance.GetWorkerCount()
+				
+				chunkSize := (numChunks + numWorkers - 1) / numWorkers // Divide work evenly
+				var wg sync.WaitGroup
+				
+				parseStart := time.Now()
+				for w := 0; w < numWorkers; w++ {
+					start := w * chunkSize
+					end := (w + 1) * chunkSize
+					if end > numChunks {
+						end = numChunks
+					}
+					
+					wg.Add(1)
+					go func(startIdx, endIdx int) {
+						defer wg.Done()
+						
+						for i := startIdx; i < endIdx; i++ {
+							e := DidxEntry{}
+							e.offset = binary.LittleEndian.Uint64(previousDidx[i*DIDX_ENTRY_SIZE : i*DIDX_ENTRY_SIZE+8])
+							e.digest = previousDidx[i*DIDX_ENTRY_SIZE+8 : i*DIDX_ENTRY_SIZE+DIDX_ENTRY_SIZE]
+							shahash := hex.EncodeToString(e.digest)
+							// Skip debug logging in parallel mode - too much contention on stdout
+							knownChunks.Set(shahash, true)
+						}
+					}(start, end)
+				}
+				
+				wg.Wait()
+				
+				if config.ShouldLogPerformance() {
+					parseDuration := time.Since(parseStart)
+					fmt.Printf("Parsed %d previous chunks in %v using %d workers\n", 
+						numChunks, parseDuration, numWorkers)
+				}
+			}
+		}
+	} else {
+		fmt.Printf("Full backup mode - skipping previous DIDX processing\n")
 	}
 
 	fmt.Printf("Known chunks: %d!\n", knownChunks.Len())
 
-	streamChunk := ChunkState{}
-	streamChunk.Init(newchunk, reusechunk, knownChunks)
+	// Use parallel processing for stream backups
+	streamChunk := &ParallelChunkState{}
+	streamChunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config)
 
 	streamChunk.wrid, err = client.CreateDynamicIndex(filename)
 	if err != nil {
 		return err
 	}
-	B := make([]byte, 65536)
+	
+	// Start parallel processing pipeline
+	streamChunk.StartParallel(client)
+	
+	// Use configurable buffer for I/O throughput
+	bufferSizes := config.Performance.GetBufferSizes()
+	B := make([]byte, bufferSizes.ReadBuffer)
+	
+	// Stream backup processing
+	
 	for {
 		
 		n, err := stream.Read(B)
 		
-		b := B[:n]
-		
-		streamChunk.HandleData(b, client)
+		if n > 0 {
+			streamChunk.HandleData(B[:n])
+		}
 
 		if err == io.EOF {
 			break
 		}
+		if err != nil {
+			return err
+		}
 	}
 
-	streamChunk.Eof(client)
+	streamChunk.Eof()
 
-	client.CloseDynamicIndex(streamChunk.wrid, hex.EncodeToString(streamChunk.chunkdigests.Sum(nil)), streamChunk.pos, streamChunk.chunkcount)
+	// CloseDynamicIndex is now handled inside Eof()
 
 	err = client.UploadManifest()
 	if err != nil {
@@ -361,7 +580,9 @@ func backup_stream(client *PBSClient, newchunk, reusechunk *atomic.Uint64, filen
 	return client.Finish()
 }
 
-func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut string, backupdir string) error {
+func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut string, backupdir string, cryptConfig *CryptConfig, config *Config) error {
+	var err error
+	var previousDidx []byte
 	knownChunks := hashmap.New[string, bool]()
 
 	fmt.Printf("Starting backup of %s\n", backupdir)
@@ -373,40 +594,94 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	client.Connect(false)
 
 	archive := &PXARArchive{}
-	archive.archivename = "backup.pxar.didx"
+	archive.archivename = PXAR_ARCHIVE_NAME
+	archive.perfConfig = config.Performance
 
-	previousDidx, err := client.DownloadPreviousToBytes(archive.archivename)
-	if err != nil {
-		return err
+	forceFullBackup := false
+
+	// Auto-detect encryption mode mismatch
+	currentlyEncrypted := (cryptConfig != nil)
+	previousEncryptionMode := client.CheckPreviousEncryptionMode()
+	if previousEncryptionMode == EncryptionUnknown {
+		fmt.Printf("Error: Could not parse previous manifest, forcing full backup\n")
+		forceFullBackup = true
+	} else {
+		previouslyEncrypted := (previousEncryptionMode == EncryptionEnabled)
+		if currentlyEncrypted != previouslyEncrypted {
+			fmt.Printf("Encryption mode mismatch detected (current: %t, previous: %t) - forcing full backup\n", currentlyEncrypted, previouslyEncrypted)
+			forceFullBackup = true
+		}
 	}
 
-	fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
-
-	/*f2, _ := os.Create("test.didx")
-	defer f2.Close()
-
-	f2.Write(previous_didx)*/
-
-	/*
-		Here we download the previous dynamic index to figure out which chunks are the same of what
-		we are going to upload to avoid unnecessary traffic and compression cpu usage
-	*/
-
-	if !bytes.HasPrefix(previousDidx, didxMagic) {
-		fmt.Printf("Previous index has wrong magic (%s)!\n", previousDidx[:8])
-
-	} else {
-		//Header as per proxmox documentation is fixed size of 4096 bytes,
-		//then offset of type uint64 and sha256 digests follow , so 40 byte each record until EOF
-		previousDidx = previousDidx[4096:]
-		for i := 0; i*40 < len(previousDidx); i += 1 {
-			e := DidxEntry{}
-			e.offset = binary.LittleEndian.Uint64(previousDidx[i*40 : i*40+8])
-			e.digest = previousDidx[i*40+8 : i*40+40]
-			shahash := hex.EncodeToString(e.digest)
-			fmt.Printf("Previous: %s\n", shahash)
-			knownChunks.Set(shahash, true)
+	if !forceFullBackup {
+		previousDidx, err = client.DownloadPreviousToBytes(archive.archivename)
+		if err != nil {
+			fmt.Printf("Could not download previous DIDX (this is normal for first backup): %v\n", err)
+			fmt.Printf("Forcing full backup mode\n")
+			forceFullBackup = true
 		}
+
+	}
+
+	if !forceFullBackup && len(previousDidx) > 0 {
+		fmt.Printf("Downloaded previous DIDX: %d bytes\n", len(previousDidx))
+
+		// Download the previous dynamic index to figure out which chunks are the same
+		// to avoid unnecessary traffic and compression cpu usage
+
+		if !bytes.HasPrefix(previousDidx, DIDX_MAGIC) {
+			fmt.Printf("Previous index has wrong magic (%s)!\n", previousDidx[:8])
+
+		} else {
+			//Header as per proxmox documentation is fixed size of 4096 bytes,
+			//then offset of type uint64 and sha256 digests follow , so 40 byte each record until EOF
+			previousDidx = previousDidx[4096:]
+			
+			// Parallel DIDX parsing for faster startup
+			numChunks := len(previousDidx) / DIDX_ENTRY_SIZE
+			if numChunks > 0 {
+				fmt.Printf("Parsing %d chunks from previous backup index...\n", numChunks)
+				
+				// Use worker pool for parallel parsing from performance config
+				numWorkers := config.Performance.GetWorkerCount()
+				
+				chunkSize := (numChunks + numWorkers - 1) / numWorkers // Divide work evenly
+				var wg sync.WaitGroup
+				
+				parseStart := time.Now()
+				for w := 0; w < numWorkers; w++ {
+					start := w * chunkSize
+					end := (w + 1) * chunkSize
+					if end > numChunks {
+						end = numChunks
+					}
+					
+					wg.Add(1)
+					go func(startIdx, endIdx int) {
+						defer wg.Done()
+						
+						for i := startIdx; i < endIdx; i++ {
+							e := DidxEntry{}
+							e.offset = binary.LittleEndian.Uint64(previousDidx[i*DIDX_ENTRY_SIZE : i*DIDX_ENTRY_SIZE+8])
+							e.digest = previousDidx[i*DIDX_ENTRY_SIZE+8 : i*DIDX_ENTRY_SIZE+DIDX_ENTRY_SIZE]
+							shahash := hex.EncodeToString(e.digest)
+							// Skip debug logging in parallel mode - too much contention on stdout
+							knownChunks.Set(shahash, true)
+						}
+					}(start, end)
+				}
+				
+				wg.Wait()
+				
+				if config.ShouldLogPerformance() {
+					parseDuration := time.Since(parseStart)
+					fmt.Printf("Parsed %d previous chunks in %v using %d workers\n", 
+						numChunks, parseDuration, numWorkers)
+				}
+			}
+		}
+	} else {
+		fmt.Printf("Full backup mode - skipping previous DIDX processing\n")
 	}
 
 	fmt.Printf("Known chunks: %d!\n", knownChunks.Len())
@@ -418,22 +693,26 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 		}
 		defer f.Close()
 	}
-	/**/
 
-	pxarChunk := ChunkState{}
-	pxarChunk.Init(newchunk, reusechunk, knownChunks)
+	// Use parallel processing for PXAR backups
+	pxarChunk := &ParallelChunkState{}
+	pxarChunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config)
 
-	pcat1Chunk := ChunkState{}
-	pcat1Chunk.Init(newchunk, reusechunk, knownChunks)
+	pcat1Chunk := &ParallelChunkState{}
+	pcat1Chunk.InitWithConfig(newchunk, reusechunk, knownChunks, cryptConfig, config)
 
 	pxarChunk.wrid, err = client.CreateDynamicIndex(archive.archivename)
 	if err != nil {
 		return err
 	}
-	pcat1Chunk.wrid, err = client.CreateDynamicIndex("catalog.pcat1.didx")
+	pcat1Chunk.wrid, err = client.CreateDynamicIndex(CATALOG_ARCHIVE_NAME)
 	if err != nil {
 		return err
 	}
+
+	// Start parallel processing pipelines
+	pxarChunk.StartParallel(client)
+	pcat1Chunk.StartParallel(client)
 
 	archive.writeCB = func(b []byte) {
 		
@@ -443,13 +722,13 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 			f.Write(b)
 		}
 
-		pxarChunk.HandleData(b, client)
+		pxarChunk.HandleData(b)
 
 		//
 	}
 
 	archive.catalogWriteCB = func(b []byte) {
-		pcat1Chunk.HandleData(b, client)
+		pcat1Chunk.HandleData(b)
 	}
 
 	//This is the entry point of backup job which will start streaming with the PCAT and PXAR write callback
@@ -458,8 +737,9 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 	archive.WriteDir(backupdir, "", true)
 
 	
-	pxarChunk.Eof(client)
-	pcat1Chunk.Eof(client)
+	pxarChunk.Eof()
+	pcat1Chunk.Eof()
+	// Note: Eof() now handles CloseDynamicIndex internally
 
 	
 
@@ -470,3 +750,5 @@ func backup(client *PBSClient, newchunk, reusechunk *atomic.Uint64, pxarOut stri
 
 	return client.Finish()
 }
+
+

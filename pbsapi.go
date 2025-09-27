@@ -40,6 +40,14 @@ type DynamicCloseReq struct {
 	WriterID   uint64 `json:"wid"`
 }
 
+type EncryptionMode int
+
+const (
+	EncryptionUnknown EncryptionMode = iota
+	EncryptionEnabled
+	EncryptionDisabled
+)
+
 type File struct {
 	CryptMode string `json:"crypt-mode"`
 	Csum      string `json:"csum"`
@@ -86,6 +94,7 @@ type PBSClient struct {
 	manifest  BackupManifest
 
 	insecure bool
+	cryptConfig *CryptConfig
 
 	client    http.Client
 	tlsConfig tls.Config
@@ -93,12 +102,48 @@ type PBSClient struct {
 	writersManifest map[uint64]int
 }
 
-var blobCompressedMagic = []byte{49, 185, 88, 66, 111, 182, 163, 127}
-var blobUncompressedMagic = []byte{66, 171, 56, 7, 190, 131, 112, 161}
+// Magic bytes moved to constants.go
+
+// sanitizeFilename ensures filename complies with PBS regex requirements for stream backups
+func sanitizeFilename(name string) string {
+	// For standard backups (backup.pxar.didx, catalog.pcat1.didx), return as-is
+	if name == PXAR_ARCHIVE_NAME || name == CATALOG_ARCHIVE_NAME {
+		return name
+	}
+	
+	// Only sanitize user-provided stream backup names
+	// Remove any path separators and ensure only valid characters
+	var result []rune
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || 
+		   (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			result = append(result, r)
+		} else {
+			result = append(result, '_') // Replace invalid chars with underscore
+		}
+	}
+	sanitized := string(result)
+	
+	// Ensure it has a valid extension for dynamic indices
+	if !strings.HasSuffix(sanitized, DIDX_EXTENSION) && !strings.HasSuffix(sanitized, FIDX_EXTENSION) {
+		if strings.Contains(sanitized, ".") {
+			// Replace extension with .didx
+			lastDot := strings.LastIndex(sanitized, ".")
+			sanitized = sanitized[:lastDot] + DIDX_EXTENSION
+		} else {
+			// Add .didx extension
+			sanitized += DIDX_EXTENSION
+		}
+	}
+	
+	return sanitized
+}
 
 func (pbs *PBSClient) CreateDynamicIndex(name string) (uint64, error) {
+	// Sanitize filename to ensure PBS compliance
+	sanitizedName := sanitizeFilename(name)
 
-	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_index", bytes.NewBuffer([]byte(fmt.Sprintf("{\"archive-name\": \"%s\"}", name))))
+	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_index", bytes.NewBuffer([]byte(fmt.Sprintf("{\"archive-name\": \"%s\"}", sanitizedName))))
 	if err != nil {
 		return 0, err
 	}
@@ -127,10 +172,14 @@ func (pbs *PBSClient) CreateDynamicIndex(name string) (uint64, error) {
 	}
 	fmt.Println("Writer id: ", R.WriterID)
 	defer resp2.Body.Close()
+	cryptMode := "none"
+	if pbs.cryptConfig != nil {
+		cryptMode = "encrypt"
+	}
 	f := File{
-		CryptMode: "none",
+		CryptMode: cryptMode,
 		Csum:      "",
-		Filename:  name,
+		Filename:  sanitizedName,
 		Size:      0,
 	}
 	pbs.manifest.Files = append(pbs.manifest.Files, f)
@@ -138,9 +187,9 @@ func (pbs *PBSClient) CreateDynamicIndex(name string) (uint64, error) {
 	return uint64(R.WriterID), nil
 }
 
-func (pbs *PBSClient) UploadUncompressedChunk(writerid uint64, digest string, chunkdata []byte) error {
+func (pbs *PBSClient) UploadUncompressedChunk(writerid uint64, digest string, chunkdata []byte, originalSize int) error {
 	outBuffer := make([]byte, 0)
-	outBuffer = append(outBuffer, blobUncompressedMagic...)
+	outBuffer = append(outBuffer, BLOB_UNCOMPRESSED_MAGIC...)
 	checksum := crc32.Checksum(chunkdata, crc32.IEEETable)
 	outBuffer = binary.LittleEndian.AppendUint32(outBuffer, checksum)
 	outBuffer = append(outBuffer, chunkdata...)
@@ -148,13 +197,10 @@ func (pbs *PBSClient) UploadUncompressedChunk(writerid uint64, digest string, ch
 	q := &url.Values{}
 	q.Add("digest", digest)
 	q.Add("encoded-size", fmt.Sprintf("%d", len(outBuffer)))
-	q.Add("size", fmt.Sprintf("%d", len(chunkdata)))
+	q.Add("size", fmt.Sprintf("%d", originalSize))
 	q.Add("wid", fmt.Sprintf("%d", writerid))
 
 	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_chunk?"+q.Encode(), bytes.NewBuffer(outBuffer))
-	if err != nil {
-		return err
-	}
 
 	resp2, err := pbs.client.Do(req)
 	if err != nil {
@@ -170,9 +216,9 @@ func (pbs *PBSClient) UploadUncompressedChunk(writerid uint64, digest string, ch
 	return nil
 }
 
-func (pbs *PBSClient) UploadCompressedChunk(writerid uint64, digest string, chunkdata []byte) error {
+func (pbs *PBSClient) UploadCompressedChunk(writerid uint64, digest string, chunkdata []byte, originalSize int) error {
 	outBuffer := make([]byte, 0)
-	outBuffer = append(outBuffer, blobCompressedMagic...)
+	outBuffer = append(outBuffer, BLOB_COMPRESSED_MAGIC...)
 	compressedData := make([]byte, 0)
 
 	//opt := zstd.WithEncoderLevel(zstd.SpeedFastest)
@@ -187,7 +233,7 @@ func (pbs *PBSClient) UploadCompressedChunk(writerid uint64, digest string, chun
 	outBuffer = append(outBuffer, compressedData...)
 
 	if len(compressedData) > len(chunkdata) {
-		pbs.UploadUncompressedChunk(writerid, digest, chunkdata)
+		pbs.UploadUncompressedChunk(writerid, digest, chunkdata, originalSize)
 		return nil
 	}
 	//fmt.Printf("Compressed: %d , Orig: %d\n", len(compressedData), len(chunkdata))
@@ -195,7 +241,7 @@ func (pbs *PBSClient) UploadCompressedChunk(writerid uint64, digest string, chun
 	q := &url.Values{}
 	q.Add("digest", digest)
 	q.Add("encoded-size", fmt.Sprintf("%d", len(outBuffer)))
-	q.Add("size", fmt.Sprintf("%d", len(chunkdata)))
+	q.Add("size", fmt.Sprintf("%d", originalSize))
 	q.Add("wid", fmt.Sprintf("%d", writerid))
 
 	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_chunk?"+q.Encode(), bytes.NewBuffer(outBuffer))
@@ -265,6 +311,13 @@ func (pbs *PBSClient) CloseDynamicIndex(writerid uint64, checksum string, totals
 		return err
 	}
 
+	
+	if resp2.StatusCode != http.StatusOK {
+		_, _ = io.ReadAll(resp2.Body)
+		resp2.Body.Close()
+		return fmt.Errorf("close dynamic index failed with status %d", resp2.StatusCode)
+	}
+
 	f := &pbs.manifest.Files[pbs.writersManifest[writerid]]
 
 	f.Csum = checksum
@@ -276,7 +329,7 @@ func (pbs *PBSClient) CloseDynamicIndex(writerid uint64, checksum string, totals
 
 func (pbs *PBSClient) UploadBlob(name string, data []byte) error {
 	out := make([]byte, 0)
-	out = append(out, blobUncompressedMagic...)
+	out = append(out, BLOB_UNCOMPRESSED_MAGIC...)
 
 	checksum := crc32.ChecksumIEEE(data)
 	out = binary.LittleEndian.AppendUint32(out, checksum)
@@ -330,40 +383,18 @@ func (pbs *PBSClient) Finish() error {
 
 func (pbs *PBSClient) Connect(reader bool) {
 	pbs.writersManifest = make(map[uint64]int)
-	pbs.tlsConfig = tls.Config{
-		InsecureSkipVerify: pbs.insecure,
-	}
-	if pbs.insecure {
-		pbs.tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			// Extract the peer certificate
-			if len(rawCerts) == 0 {
-				return fmt.Errorf("no certificates presented by the peer")
-			}
-			peerCert, err := x509.ParseCertificate(rawCerts[0])
-			if err != nil {
-				return fmt.Errorf("failed to parse certificate: %v", err)
-			}
+	pbs.setupTLSConfig()
 
-			// Calculate the SHA-256 fingerprint of the certificate
-			expectedFingerprint := strings.ReplaceAll(pbs.certfingerprint, ":", "")
-			calculatedFingerprint := sha256.Sum256(peerCert.Raw)
-
-			// Compare the calculated fingerprint with the expected one
-			if hex.EncodeToString(calculatedFingerprint[:]) != expectedFingerprint {
-				return fmt.Errorf("certificate fingerprint does not match (%s,%s)", expectedFingerprint, hex.EncodeToString(calculatedFingerprint[:]))
-			}
-
-			// If the fingerprint matches, the certificate is considered valid
-			return nil
+	// Only set current time and defaults for backup mode, not restore mode
+	if !reader {
+		pbs.manifest.BackupTime = time.Now().Unix()
+		pbs.manifest.BackupType = "host"
+		if pbs.manifest.BackupID == "" {
+			hostname, _ := os.Hostname()
+			pbs.manifest.BackupID = hostname
 		}
 	}
-
-	pbs.manifest.BackupTime = time.Now().Unix()
-	pbs.manifest.BackupType = "host"
-	if pbs.manifest.BackupID == "" {
-		hostname, _ := os.Hostname()
-		pbs.manifest.BackupID = hostname
-	}
+	// For reader mode, keep the values set by ConnectReader
 	pbs.client = http.Client{
 		Transport: &http2.Transport{
 
@@ -378,16 +409,23 @@ func (pbs *PBSClient) Connect(reader bool) {
 					return nil, err
 				}
 				q := &url.Values{}
+
 				q.Add("backup-time", fmt.Sprintf("%d", pbs.manifest.BackupTime))
 				q.Add("backup-type", pbs.manifest.BackupType)
 				q.Add("store", pbs.datastore)
 				if pbs.namespace != "" {
 					q.Add("ns", pbs.namespace)
 				}
-
 				q.Add("backup-id", pbs.manifest.BackupID)
-				q.Add("debug", "1")
-				conn.Write([]byte("GET /api2/json/backup?" + q.Encode() + " HTTP/1.1\r\n"))
+
+				// Use different endpoint for reader vs backup protocol
+				endpoint := API_BACKUP_ENDPOINT
+				if reader {
+					endpoint = API_READER_ENDPOINT
+				}
+
+				requestLine := "GET " + endpoint + "?" + q.Encode() + " HTTP/1.1\r\n"
+				conn.Write([]byte(requestLine))
 				conn.Write([]byte("Authorization: " + fmt.Sprintf("PBSAPIToken=%s:%s", pbs.authid, pbs.secret) + "\r\n"))
 				if !reader {
 					conn.Write([]byte("Upgrade: proxmox-backup-protocol-v1\r\n"))
@@ -428,6 +466,114 @@ func (pbs *PBSClient) Connect(reader bool) {
 
 }
 
+// setupTLSConfig configures TLS settings including certificate fingerprint validation
+func (pbs *PBSClient) setupTLSConfig() {
+	pbs.tlsConfig = tls.Config{
+		InsecureSkipVerify: pbs.insecure,
+	}
+
+	// use custom validation instead of CA validation
+	if pbs.insecure {
+		pbs.tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			// Extract the peer certificate
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("no certificates presented by the peer")
+			}
+			peerCert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("failed to parse certificate: %v", err)
+			}
+
+			// Calculate the SHA-256 fingerprint of the certificate
+			expectedFingerprint := strings.ToLower(strings.ReplaceAll(pbs.certfingerprint, ":", ""))
+			calculatedFingerprint := sha256.Sum256(peerCert.Raw)
+			calculatedFingerprintStr := strings.ToLower(hex.EncodeToString(calculatedFingerprint[:]))
+
+			// Compare the calculated fingerprint with the expected one (case-insensitive)
+			if calculatedFingerprintStr != expectedFingerprint {
+				return fmt.Errorf("certificate fingerprint does not match (%s,%s)", expectedFingerprint, calculatedFingerprintStr)
+			}
+
+			// If the fingerprint matches, the certificate is considered valid
+			return nil
+		}
+	}
+}
+
+func (pbs *PBSClient) ConnectHTTP() {
+	// For REST API operations, use a standard HTTP client without protocol upgrade
+	pbs.setupTLSConfig()
+
+	// Standard HTTP client for REST API calls
+	pbs.client = http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &pbs.tlsConfig,
+		},
+		Timeout: 60 * time.Second,
+	}
+}
+
+
+// DownloadFile downloads a file using the reader protocol /download endpoint
+func (pbs *PBSClient) DownloadFile(filename string) ([]byte, error) {
+	q := &url.Values{}
+	q.Add("file-name", filename)
+
+	url := pbs.baseurl + "/download?" + q.Encode()
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := pbs.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error downloading file: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func (pbs *PBSClient) UploadRawChunk(writerid uint64, digest string, chunkdata []byte, originalSize int) error {
+	// For encrypted chunks, chunkdata is already a properly formatted DataBlob
+	// Just upload it directly without any additional processing
+	q := &url.Values{}
+	q.Add("digest", digest)
+	q.Add("encoded-size", fmt.Sprintf("%d", len(chunkdata)))
+	q.Add("size", fmt.Sprintf("%d", originalSize))
+	q.Add("wid", fmt.Sprintf("%d", writerid))
+
+	req, err := http.NewRequest("POST", pbs.baseurl+"/dynamic_chunk?"+q.Encode(), bytes.NewBuffer(chunkdata))
+	if err != nil {
+		return err
+	}
+
+	resp2, err := pbs.client.Do(req)
+	if err != nil {
+		fmt.Println("Error making request:", err)
+		return err
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		resp1, err := io.ReadAll(resp2.Body)
+		fmt.Println("Error making request:", string(resp1), string(resp2.Proto))
+		return err
+	}
+	return nil
+}
+
+
 func (pbs *PBSClient) DownloadPreviousToBytes(archivename string) ([]byte, error) { //In the future also download to tmp if index is extremely big...
 	q := &url.Values{}
 
@@ -454,3 +600,118 @@ func (pbs *PBSClient) DownloadPreviousToBytes(archivename string) ([]byte, error
 	return ret, nil
 
 }
+
+func (pbs *PBSClient) CheckPreviousEncryptionMode() EncryptionMode {
+	manifestData, err := pbs.DownloadPreviousToBytes("index.json.blob")
+	if err != nil {
+		fmt.Printf("Could not download previous manifest (this is normal for first backup): %v\n", err)
+		return EncryptionUnknown // No previous backup
+	}
+
+	var manifestJSON []byte
+	var prevManifest BackupManifest
+	
+	// First try: parse as unencrypted manifest (skip 12-byte DataBlob header)
+	if len(manifestData) >= 12 {
+		manifestJSON = manifestData[12:]
+		err = json.Unmarshal(manifestJSON, &prevManifest)
+		if err == nil {
+			return EncryptionDisabled // Previous backup was unencrypted
+		}
+	}
+	
+	// Second try: decode as encrypted DataBlob (if we have encryption configured)
+	if pbs.cryptConfig != nil {
+		manifestJSON, err = DecodeDataBlob(manifestData, pbs.cryptConfig)
+		if err == nil {
+			err = json.Unmarshal(manifestJSON, &prevManifest)
+			if err == nil {
+				return EncryptionEnabled // Previous backup was encrypted
+			}
+		}
+	}
+	
+	return EncryptionUnknown // Could not parse manifest
+}
+
+func (pbs *PBSClient) DownloadChunk(digest string) ([]byte, error) {
+	q := &url.Values{}
+	q.Add("digest", digest)
+
+	url := pbs.baseurl + "/chunk?" + q.Encode()
+	
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Authorization", fmt.Sprintf("PBSAPIToken=%s:%s", pbs.authid, pbs.secret))
+
+	resp, err := pbs.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error making chunk download request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("chunk download failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	chunkData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading chunk data: %v", err)
+	}
+	
+	return chunkData, nil
+}
+
+type BackupSnapshot struct {
+	BackupID   string `json:"backup-id"`
+	BackupTime int64  `json:"backup-time"`
+	BackupType string `json:"backup-type"`
+	Comment    string `json:"comment"`
+	Files      []File `json:"files"`
+}
+
+func (pbs *PBSClient) ListSnapshots() ([]BackupSnapshot, error) {
+	q := &url.Values{}
+	q.Add("backup-type", "host")
+	if pbs.namespace != "" {
+		q.Add("ns", pbs.namespace)
+	}
+
+	req, err := http.NewRequest("GET", pbs.baseurl+API_SNAPSHOTS_ENDPOINT+pbs.datastore+"/snapshots?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Authorization", fmt.Sprintf("PBSAPIToken=%s:%s", pbs.authid, pbs.secret))
+
+	resp, err := pbs.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error making snapshot list request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("snapshot list failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var response struct {
+		Data []BackupSnapshot `json:"data"`
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response body: %v", err)
+	}
+
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing snapshot list: %v", err)
+	}
+
+	return response.Data, nil
+}
+
+

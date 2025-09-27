@@ -1,30 +1,68 @@
 {
-    "baseurl": "https://your.pbs.installation.net:8007",
-    "certfingerprint": "XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX",
-    "authid": "MY-SECRET-AUTH-ID",
-    "secret": "secret-uuid",
-    "datastore": "myDatastore",
-    "backupdir": "C:",
+    "comment": "Complete configuration example with all possible settings for backup, restore, encryption, performance, and notifications",
+
+    "comment": "=== CONNECTION SETTINGS (required for all operations) ===",
+    "baseurl": "https://your-pbs-server:8007",
+    "certfingerprint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+    "authid": "user@realm!api-token",
+    "secret": "your-api-secret-uuid",
+    "datastore": "your-datastore",
     "namespace": "",
-    "backup-id": "",
+    "backup-id": "your-hostname",
+
+    "comment": "=== BACKUP SETTINGS (used when -restore flag is NOT present) ===",
+    "backupdir": "/path/to/backup/directory",
+    "backupstreamname": "",
     "pxarout": "",
+    "log-level": "info",
+    "debug": false,
+
+    "comment": "=== RESTORE SETTINGS (used when -restore flag IS present) ===",
+    "restore-archive": "backup.pxar.didx",
+    "restore-output": "/path/to/restore/directory",
+    "restore-snapshot": "latest",
+    "list-snapshots": false,
+
+    "comment": "=== ENCRYPTION SETTINGS (optional, used for both backup and restore) ===",
+    "encryption-key-path": "/path/to/encryption-key.json",
+    "encryption-password": "your-encryption-password",
+    "master-key-path": "/path/to/master-key-public.pem",
+
+    "comment": "=== PERFORMANCE SETTINGS (optional, for optimization) ===",
+    "performance": {
+        "read-buffer-mb": 16,
+        "worker-count": 8,
+        "chunk-size-mb": 4
+    },
+
+    "comment": "=== EMAIL NOTIFICATION SETTINGS (optional, mainly for backup) ===",
     "smtp": {
         "host": "smtp.example.com",
-        "port": "465",
-        "username": "my-user@example.com",
-        "password": "my-password",
+        "port": "587",
+        "username": "backup-notifications@example.com",
+        "password": "smtp-password",
         "insecure": false,
         "template": {
-            "subject": "{{if not .Success}}[FAILED]{{else}}[SUCCESS]{{end}} Backup report for {{.Datastore}}",
-            "body": "Backup {{if .Success}}completed{{else}}ended with errors{{end}} on host {{.Hostname}} (took {{.FromattedDuration}})\n{{if .Success}}Chunks New {{.NewChunks}}, Reused {{.ReusedChunks}}.{{else}}Error occurred while working, backup may be not completed.\nLast error is: {{.ErrorStr}}{{end}}"
+            "subject": "{{if not .Success}}[FAILED]{{else}}[SUCCESS]{{end}} Backup {{.Datastore}}/{{.BackupID}}",
+            "body": "Backup {{if .Success}}completed successfully{{else}}failed{{end}} on host {{.Hostname}}\nDuration: {{.FromattedDuration}}\n{{if .Success}}New chunks: {{.NewChunks}}, Reused: {{.ReusedChunks}}{{else}}Error: {{.ErrorStr}}{{end}}"
         },
-        "mails": [{
-            "from": "sender1@example.com",
-            "to": "receiver1@example.com
-        }, {
-            "from": "sender2@example.com",
-            "to": "receiver2@example.com
-        }]
+        "mails": [
+            {
+                "from": "backup@example.com",
+                "to": "admin@example.com"
+            },
+            {
+                "from": "backup@example.com",
+                "to": "alerts@example.com"
+            }
+        ]
+    },
 
-    }
+    "comment": "=== USAGE EXAMPLES ===",
+    "comment": "Basic backup: proxmoxbackupgo -config config.combined.example.json",
+    "comment": "Stream backup: proxmoxbackupgo -config config.combined.example.json -backupstream database.sql",
+    "comment": "List snapshots: proxmoxbackupgo -config config.combined.example.json -list-snapshots",
+    "comment": "Full restore: proxmoxbackupgo -config config.combined.example.json -restore \"*\"",
+    "comment": "Selective restore: proxmoxbackupgo -config config.combined.example.json -restore \"Documents/folder\"",
+    "comment": "Stream restore: proxmoxbackupgo -config config.combined.example.json -restore \"*\" -restore-archive \"database.sql.didx\""
 }
